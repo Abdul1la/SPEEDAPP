@@ -2,11 +2,16 @@ import type { FastifyPluginAsync } from 'fastify';
 
 import { requireUser } from '../auth/auth.ts';
 import type { Deps } from '../app.ts';
-import { badRequest } from '../lib/errors.ts';
+import { ApiError, badRequest } from '../lib/errors.ts';
 import { planRoutes } from '../services/geo.ts';
 import type { GeoProvider } from '../services/geo.ts';
 
 const latLng = /^(-?\d{1,2}(?:\.\d+)?),(-?\d{1,3}(?:\.\d+)?)$/;
+
+const LANGS = ['en', 'default', 'de', 'fr'];
+
+/** Groups one search's requests (Google bills a whole search once). */
+const session = { type: 'string', pattern: '^[A-Za-z0-9_-]{8,36}$' };
 
 function parseLatLng(value: string, name: string) {
   const m = latLng.exec(value.trim());
@@ -23,8 +28,8 @@ export function geoRoutes({ db }: Deps, geo: GeoProvider): FastifyPluginAsync {
   return async (app) => {
     app.addHook('preHandler', requireUser(db));
 
-    // Search as you type: "Duhok", a street, a shop...
-    app.get<{ Querystring: { q: string; lat?: number; lng?: number; lang?: string } }>(
+    // Search as you type: "Duhok", a street, a shop... Iraq first.
+    app.get<{ Querystring: { q: string; lat?: number; lng?: number; lang?: string; session?: string } }>(
       '/places',
       {
         config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
@@ -36,15 +41,40 @@ export function geoRoutes({ db }: Deps, geo: GeoProvider): FastifyPluginAsync {
               q: { type: 'string', minLength: 1, maxLength: 120 },
               lat: { type: 'number', minimum: -90, maximum: 90 },
               lng: { type: 'number', minimum: -180, maximum: 180 },
-              lang: { type: 'string', enum: ['en', 'default', 'de', 'fr'], default: 'en' },
+              lang: { type: 'string', enum: LANGS, default: 'en' },
+              session,
             },
           },
         },
       },
       async (request) => {
-        const { q, lat, lng, lang = 'en' } = request.query;
+        const { q, lat, lng, lang = 'en', session: token } = request.query;
         const near = lat != null && lng != null ? { lat, lng } : null;
-        return { places: await geo.search(q.trim(), near, lang) };
+        const places = await geo.search(q.trim(), near, lang, token);
+        return { places, source: places.some((p) => p.id.startsWith('g:')) ? 'google' : 'osm' };
+      },
+    );
+
+    // Where a search result is, for results that came without it (Google).
+    app.get<{ Params: { id: string }; Querystring: { lang?: string; session?: string } }>(
+      '/places/:id',
+      {
+        config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
+        schema: {
+          params: {
+            type: 'object',
+            properties: { id: { type: 'string', pattern: '^(g:[A-Za-z0-9_-]{4,300}|[NWRX][A-Za-z0-9.,-]{1,40})$' } },
+          },
+          querystring: {
+            type: 'object',
+            properties: { lang: { type: 'string', enum: LANGS, default: 'en' }, session },
+          },
+        },
+      },
+      async (request) => {
+        const place = await geo.place(request.params.id, request.query.lang ?? 'en', request.query.session);
+        if (!place) throw new ApiError(404, 'place_not_found', 'That place was not found. Search again.');
+        return { place };
       },
     );
 

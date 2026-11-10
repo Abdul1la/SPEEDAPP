@@ -17,6 +17,7 @@ import 'package:new_project/theme/app_theme.dart';
 import 'package:new_project/utils/geo.dart';
 import 'package:new_project/utils/polyline.dart';
 import 'package:new_project/widgets/route_sheet.dart';
+import 'package:new_project/widgets/ui.dart';
 
 /// Google polyline encoder (precision 6), the inverse of decodePolyline.
 String encode(List<(double, double)> path) {
@@ -68,10 +69,60 @@ final erbil = Place(
   kind: 'city',
 );
 
+/// Place lookups the fake backend got (`GET /v1/places/:id`).
+final lookups = <Uri>[];
+
 /// A fake backend: two routes north (straight, and with a bend), one camera.
 http.Client fakeBackend({int routesStatus = 200}) =>
     MockClient((request) async {
       final path = request.url.path;
+      if (path == '/v1/places' &&
+          request.url.queryParameters['q']!.contains('lelav')) {
+        // Google results: no spot until picked.
+        return http.Response(
+          jsonEncode({
+            'places': [
+              {
+                'id': 'g:LELAV_123',
+                'name': 'Lelav City',
+                'address': 'Nzarke, Duhok, Iraq',
+                'lat': null,
+                'lng': null,
+                'kind': 'neighbourhood',
+                'distanceM': 4200,
+              },
+            ],
+            'source': 'google',
+          }),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      }
+      if (request.url.pathSegments.length == 3 &&
+          request.url.pathSegments[1] == 'places') {
+        lookups.add(request.url);
+        if (request.url.pathSegments.last != 'g:LELAV_123') {
+          return http.Response(
+            jsonEncode({
+              'error': {'code': 'place_not_found', 'message': 'Not found.'},
+            }),
+            404,
+          );
+        }
+        return http.Response(
+          jsonEncode({
+            'place': {
+              'id': 'g:LELAV_123',
+              'name': '',
+              'address': 'Nzarke, Duhok',
+              'lat': 36.84,
+              'lng': 43.01,
+              'kind': 'neighbourhood',
+            },
+          }),
+          200,
+        );
+      }
       if (path == '/v1/places') {
         return http.Response(
           jsonEncode({
@@ -121,7 +172,30 @@ http.Client fakeBackend({int routesStatus = 200}) =>
                 'polyline': encode(straight),
                 'cameras': 1,
                 'bumps': 0,
+                'mobiles': 0,
                 'pointIds': ['77'],
+                'steps': [
+                  {
+                    'instruction': 'Head north on Zakho Road',
+                    'type': 'depart',
+                    'modifier': '',
+                    'name': 'Zakho Road',
+                    'distanceM': 2000,
+                    'durationS': 180,
+                    'lat': duhok.lat,
+                    'lng': duhok.lng,
+                  },
+                  {
+                    'instruction': 'Arrive at your destination',
+                    'type': 'arrive',
+                    'modifier': '',
+                    'name': '',
+                    'distanceM': 0,
+                    'durationS': 0,
+                    'lat': north2km.$1,
+                    'lng': north2km.$2,
+                  },
+                ],
               },
               {
                 'distanceM': 3000,
@@ -300,6 +374,86 @@ void main() {
     expect(storage.recent.single.name, 'Duhok');
   });
 
+  testWidgets('search: a Google result is looked up when picked', (
+    tester,
+  ) async {
+    lookups.clear();
+    final storage = _MemoryStorage();
+    final app = appWith(fakeBackend(), storage);
+    Place? picked;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async => picked = await Navigator.push<Place>(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => SearchScreen(app: app, storage: storage),
+                ),
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'lelav city');
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+    await tester.pumpAndSettle();
+    expect(find.text('Lelav City'), findsOneWidget);
+    expect(find.text('Nzarke, Duhok, Iraq'), findsOneWidget);
+    expect(find.text('4.2 km'), findsOneWidget); // from the search service
+    expect(find.text('Google Maps'), findsOneWidget); // its credit
+
+    await tester.tap(find.text('Lelav City'));
+    await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+    await tester.pumpAndSettle();
+    expect(lookups, hasLength(1));
+    final session = lookups.single.queryParameters['session']!;
+    expect(session, matches(RegExp(r'^[A-Za-z0-9_-]{32}$')));
+    expect(picked?.name, 'Lelav City');
+    expect(picked?.address, 'Nzarke, Duhok, Iraq');
+    expect(picked?.located, isTrue);
+    expect((picked!.lat, picked!.lng), (36.84, 43.01));
+    // Google's coordinates are not kept: looked up again next time.
+    final saved = storage.recent.single.toJson();
+    expect(saved.containsKey('lat'), isFalse);
+    expect(Place.fromJson(saved).located, isFalse);
+  });
+
+  test('places: Google ones keep no coordinates; spot merged in', () {
+    final hit = Place.fromJson({
+      'id': 'g:X1',
+      'name': 'Mazi Mall',
+      'address': 'Duhok, Iraq',
+      'lat': null,
+      'lng': null,
+      'kind': 'mall',
+      'distanceM': 900,
+    });
+    expect(hit.located, isFalse);
+    expect(hit.distanceM, 900);
+    final spot = hit.locatedAt(
+      const Place(id: 'g:X1', name: '', address: 'Zakho Rd', lat: 1, lng: 2),
+    );
+    expect(spot.located, isTrue);
+    expect(
+      (spot.name, spot.address, spot.kind),
+      ('Mazi Mall', 'Duhok, Iraq', 'mall'),
+    );
+    expect(spot.toJson().containsKey('lat'), isFalse);
+    // OpenStreetMap places keep theirs.
+    const osm = Place(id: 'N5', name: 'Duhok', address: '', lat: 36.8, lng: 43);
+    expect(Place.fromJson(osm.toJson()).located, isTrue);
+    expect(placeKindLabel('mall'), 'Mall');
+    expect(placeIcon('mall'), Icons.local_mall_rounded);
+  });
+
   testWidgets('route sheet: options with cameras, choose one, Start', (
     tester,
   ) async {
@@ -331,6 +485,8 @@ void main() {
     expect(find.text('Fastest'), findsOneWidget);
     expect(find.textContaining('3 min'), findsOneWidget);
     expect(find.text('1 camera'), findsOneWidget);
+    await tester.ensureVisible(find.text('via Ring Road'));
+    await tester.pumpAndSettle();
     expect(
       find.text('No speed cameras or bumps known on this way'),
       findsOneWidget,
@@ -344,6 +500,103 @@ void main() {
     await tester.tap(find.text('Start'));
     await tester.pumpAndSettle();
     expect(started, isTrue);
+  });
+
+  test('what is on the way, in order, with how far along', () async {
+    final app = appWith(fakeBackend());
+    app.debugGpsFix(at((duhok.lat, duhok.lng)));
+    await app.planRoute(erbil);
+    final straight = app.routeOptions[0];
+    expect(straight.steps.map((s) => s.type), ['depart', 'arrive']);
+    expect(straight.steps.first.instruction, 'Head north on Zakho Road');
+    final stops = straight.stopsFrom(app.mapPoints);
+    expect(stops, hasLength(1));
+    expect(stops.single.point.remoteId, '77');
+    expect(stops.single.atM, closeTo(1000, 10));
+    // The other way has none, and no directions came for it.
+    expect(app.routeOptions[1].stopsFrom(app.mapPoints), isEmpty);
+    expect(app.routeOptions[1].steps, isEmpty);
+  });
+
+  testWidgets('route details: place, trip, cameras on the way, directions', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 740) * 3;
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
+    final app = appWith(fakeBackend());
+    app.debugGpsFix(at((duhok.lat, duhok.lng)));
+    await tester.runAsync(() => app.planRoute(erbil));
+    bool? started;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async =>
+                  started = await showRouteOptions(context, app),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    // The sheet says what the place is and how far.
+    expect(find.text('City · Iraq · 2.0 km away · 2 ways'), findsOneWidget);
+
+    // The Details button on the card of the way via [road].
+    Future<void> openDetails(String road) async {
+      await tester.ensureVisible(find.text(road, skipOffstage: false));
+      await tester.pumpAndSettle();
+      final card = find.ancestor(
+        of: find.text(road),
+        matching: find.byType(AppCard),
+      );
+      await tester.tap(
+        find.descendant(of: card, matching: find.text('Details')),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    // Details of the second way: selects it, nothing on it.
+    await openDetails('via Ring Road');
+    expect(tester.takeException(), isNull);
+    expect(app.selectedRoute, 1);
+    expect(
+      find.textContaining('No speed cameras or bumps known'),
+      findsOneWidget,
+    );
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pumpAndSettle();
+
+    // Details of the fastest way.
+    await openDetails('via Zakho Road');
+    expect(app.selectedRoute, 0);
+    expect(find.text('Erbil'), findsOneWidget);
+    expect(find.text('City'), findsOneWidget);
+    expect(find.textContaining('2.0 km from you'), findsOneWidget);
+    expect(find.textContaining('Arrive at about'), findsOneWidget);
+    expect(find.text('via Zakho Road'), findsOneWidget);
+    expect(find.text('1 speed camera'), findsOneWidget);
+    expect(find.text('On the way · 1'), findsOneWidget);
+    expect(find.text('Speed camera'), findsOneWidget);
+    expect(find.textContaining('at 1.0 km'), findsOneWidget);
+    expect(find.text('80'), findsOneWidget); // its speed limit sign
+    await tester.scrollUntilVisible(
+      find.text('Arrive at your destination'),
+      200,
+    );
+    expect(find.text('Head north on Zakho Road'), findsOneWidget);
+    expect(find.text('then 2.0 km'), findsOneWidget);
+
+    // Start from the details page: both pages close, route starts.
+    await tester.tap(find.text('Start this route'));
+    await tester.pumpAndSettle();
+    expect(started, isTrue);
+    expect(find.text('To Erbil'), findsNothing);
   });
 
   test('durations read naturally', () {

@@ -163,6 +163,11 @@ class ApiClient {
   Future<Map<String, dynamic>> unvote(String id) =>
       _send('DELETE', '/v1/points/$id/vote');
 
+  /// The driver suddenly slowed down (a likely police radar). Returns
+  /// `{ counted, radar }`; `radar` is the police radar found or kept there.
+  Future<Map<String, dynamic>> slowdown(Map<String, dynamic> body) =>
+      _send('POST', '/v1/slowdowns', body: body);
+
   Future<void> report(String id, String reason, String? comment) => _send(
     'POST',
     '/v1/points/$id/reports',
@@ -188,7 +193,12 @@ class ApiClient {
 
   /// Places matching [query] (search as you type), nearest to (lat, lng)
   /// first when given.
-  Future<List<Place>> places(String query, {double? lat, double? lng}) async {
+  Future<List<Place>> places(
+    String query, {
+    double? lat,
+    double? lng,
+    String? session,
+  }) async {
     final json = await _send(
       'GET',
       '/v1/places',
@@ -198,12 +208,23 @@ class ApiClient {
           'lat': lat.toStringAsFixed(5),
           'lng': lng.toStringAsFixed(5),
         },
+        'session': ?session,
       },
     );
     return [
       for (final p in (json['places'] as List).cast<Map<String, dynamic>>())
         Place.fromJson(p),
     ];
+  }
+
+  /// Where a search result is (Google results come without their spot).
+  Future<Place> place(String id, {String? session}) async {
+    final json = await _send(
+      'GET',
+      '/v1/places/${Uri.encodeComponent(id)}',
+      query: {'session': ?session},
+    );
+    return Place.fromJson(json['place'] as Map<String, dynamic>);
   }
 
   /// Driving routes, fastest first, with the cameras and bumps on each.

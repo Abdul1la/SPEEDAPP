@@ -9,13 +9,14 @@ import type { Config } from './config.ts';
 import { selectOne } from './db.ts';
 import type { Db } from './db.ts';
 import { ApiError } from './lib/errors.ts';
-import { osmProvider } from './services/geo.ts';
+import { geoProvider } from './services/geo.ts';
 import type { GeoProvider } from './services/geo.ts';
 import { adminRoutes } from './routes/admin.ts';
 import { authRoutes } from './routes/auth.ts';
 import { geoRoutes } from './routes/geo.ts';
 import { meRoutes } from './routes/me.ts';
 import { pointRoutes } from './routes/points.ts';
+import { slowdownRoutes } from './routes/slowdowns.ts';
 
 export interface Deps {
   db: Db;
@@ -89,9 +90,10 @@ export async function buildApp(
 
   await app.register(authRoutes(deps), { prefix: '/v1/auth' });
   await app.register(pointRoutes(deps), { prefix: '/v1/points' });
+  await app.register(slowdownRoutes(deps), { prefix: '/v1/slowdowns' });
   await app.register(meRoutes(deps), { prefix: '/v1/me' });
   await app.register(adminRoutes(deps), { prefix: '/v1/admin' });
-  await app.register(geoRoutes(deps, deps.geo ?? osmProvider(deps.config)), { prefix: '/v1' });
+  await app.register(geoRoutes(deps, deps.geo ?? geoProvider(deps.config)), { prefix: '/v1' });
 
   // Admin panel (static page that uses /v1/admin).
   await app.register(fastifyStatic, {

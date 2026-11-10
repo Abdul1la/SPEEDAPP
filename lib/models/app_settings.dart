@@ -17,6 +17,7 @@ class AppSettings {
   const AppSettings({
     this.cameraDistances = const [500, 300, 200, 100],
     this.bumpDistances = const [300, 100],
+    this.mobileDistances = const [500, 200],
     this.overSpeedTolerance = 5,
     this.muted = false,
     this.keepScreenOn = true,
@@ -26,11 +27,15 @@ class AppSettings {
     this.sharePoints = true,
     this.tones = const {},
     this.speakDistance = true,
+    this.findRadar = true,
   });
 
   /// Distances in meters at which a warning is spoken, for each type.
   final List<int> cameraDistances;
   final List<int> bumpDistances;
+
+  /// Police radar (see `PointType.mobile`).
+  final List<int> mobileDistances;
 
   /// How many km/h over the limit before the "slow down" warning plays.
   final int overSpeedTolerance;
@@ -60,6 +65,11 @@ class AppSettings {
   /// After a built-in sound, the phone voice says the distance (and the
   /// speed limit), e.g. "Speed camera in 300 meters. Limit 80."
   final bool speakDistance;
+
+  /// Help find police radar automatically: when this driver suddenly slows
+  /// down on a fast road (without stopping), that spot is sent to the
+  /// server. Several drivers at the same new spot = a likely police radar.
+  final bool findRadar;
 
   int repeatFor(String group) => (repeats[group] ?? 1).clamp(1, maxRepeat);
 
@@ -93,6 +103,7 @@ class AppSettings {
     final list = switch (type) {
       PointType.camera => cameraDistances,
       PointType.bump => bumpDistances,
+      PointType.mobile => mobileDistances,
     };
     return [...list]..sort((a, b) => b.compareTo(a));
   }
@@ -100,6 +111,7 @@ class AppSettings {
   AppSettings copyWith({
     List<int>? cameraDistances,
     List<int>? bumpDistances,
+    List<int>? mobileDistances,
     int? overSpeedTolerance,
     bool? muted,
     bool? keepScreenOn,
@@ -109,10 +121,12 @@ class AppSettings {
     bool? sharePoints,
     Map<String, String>? tones,
     bool? speakDistance,
+    bool? findRadar,
   }) {
     return AppSettings(
       cameraDistances: cameraDistances ?? this.cameraDistances,
       bumpDistances: bumpDistances ?? this.bumpDistances,
+      mobileDistances: mobileDistances ?? this.mobileDistances,
       overSpeedTolerance: overSpeedTolerance ?? this.overSpeedTolerance,
       muted: muted ?? this.muted,
       keepScreenOn: keepScreenOn ?? this.keepScreenOn,
@@ -122,6 +136,7 @@ class AppSettings {
       sharePoints: sharePoints ?? this.sharePoints,
       tones: tones ?? this.tones,
       speakDistance: speakDistance ?? this.speakDistance,
+      findRadar: findRadar ?? this.findRadar,
     );
   }
 
@@ -137,6 +152,7 @@ class AppSettings {
   Map<String, dynamic> toBackupJson() => {
     'cameraDistances': cameraDistances,
     'bumpDistances': bumpDistances,
+    'mobileDistances': mobileDistances,
     'overSpeedTolerance': overSpeedTolerance,
     'keepScreenOn': keepScreenOn,
     'mapLook': mapLook.name,
@@ -145,14 +161,13 @@ class AppSettings {
     // Built-in sounds come with every copy of the app, so they are backed up.
     'tones': tones,
     'speakDistance': speakDistance,
+    'findRadar': findRadar,
   };
 
   /// Settings restored from a backup, keeping this phone's own sounds.
-  AppSettings restoredFrom(Map<String, dynamic> backup) => AppSettings.fromJson({
-    ...backup,
-    'muted': muted,
-    'sounds': toJson()['sounds'],
-  });
+  AppSettings restoredFrom(Map<String, dynamic> backup) => AppSettings.fromJson(
+    {...backup, 'muted': muted, 'sounds': toJson()['sounds']},
+  );
 
   factory AppSettings.fromJson(Map<String, dynamic> json) {
     const d = AppSettings();
@@ -201,8 +216,13 @@ class AppSettings {
         final bool v => v,
         _ => d.speakDistance,
       },
+      findRadar: switch (json['findRadar']) {
+        final bool v => v,
+        _ => d.findRadar,
+      },
       cameraDistances: ints(json['cameraDistances'], d.cameraDistances),
       bumpDistances: ints(json['bumpDistances'], d.bumpDistances),
+      mobileDistances: ints(json['mobileDistances'], d.mobileDistances),
       overSpeedTolerance:
           (json['overSpeedTolerance'] as num?)?.round() ?? d.overSpeedTolerance,
       muted: json['muted'] as bool? ?? d.muted,

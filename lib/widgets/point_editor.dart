@@ -169,6 +169,15 @@ class _PointEditorState extends State<_PointEditor> {
     super.dispose();
   }
 
+  /// Types this point can have. A new point can be anything; a fixed point
+  /// can't become a police radar (it expires) or the other way round.
+  List<PointType> get _types => widget.isNew
+      ? PointType.values
+      : [
+          for (final t in PointType.values)
+            if (t.temporary == widget.initial.type.temporary) t,
+        ];
+
   SpeedPoint get _result => _community
       ? _live.copyWith(sound: () => _sound, repeat: () => _repeat)
       : widget.initial.copyWith(
@@ -176,11 +185,16 @@ class _PointEditorState extends State<_PointEditor> {
           lng: _location.lng,
           type: _type,
           speedLimit: () => _limit,
-          direction: () => _direction,
+          // Police radar warns both ways and is always shared.
+          direction: () => _type.temporary ? null : _direction,
           note: () => _note.text.trim().isEmpty ? null : _note.text.trim(),
           sound: () => _sound,
           repeat: () => _repeat,
-          shared: _shared,
+          shared: _type.temporary || _shared,
+          expiresAt: () => _type.temporary
+              ? widget.initial.expiresAt ??
+                    DateTime.now().add(policeRadarLifetime)
+              : null,
         );
 
   Future<void> _showError(String message) => showDialog<void>(
@@ -444,7 +458,7 @@ class _PointEditorState extends State<_PointEditor> {
     final slots = SoundSlot.forApproach(_type, first);
     final defaultRepeat = settings.repeatFor(SoundSlot.type(_type));
     final hasOwn = app.sounds.has(_sound);
-    final limit = _type == PointType.camera && _limit != null
+    final limit = _type != PointType.bump && _limit != null
         ? ' Limit $_limit.'
         : '';
 
@@ -545,23 +559,25 @@ class _PointEditorState extends State<_PointEditor> {
             if (_community)
               _buildCommunity(context)
             else ...[
-              const SectionLabel('Type'),
-              SegmentedControl<PointType>(
-                value: _type,
-                onChanged: (t) => setState(() => _type = t),
-                segments: [
-                  for (final t in PointType.values)
-                    Segment(
-                      t,
-                      t.label,
-                      icon: PointGlyph(
-                        type: t,
-                        size: 18,
-                        color: _type == t ? p.colorFor(t) : p.textSecondary,
+              if (_types.length > 1) ...[
+                const SectionLabel('Type'),
+                SegmentedControl<PointType>(
+                  value: _type,
+                  onChanged: (t) => setState(() => _type = t),
+                  segments: [
+                    for (final t in _types)
+                      Segment(
+                        t,
+                        t.label,
+                        icon: PointGlyph(
+                          type: t,
+                          size: 18,
+                          color: _type == t ? p.colorFor(t) : p.textSecondary,
+                        ),
                       ),
-                    ),
-                ],
-              ),
+                  ],
+                ),
+              ],
 
               const SectionLabel('Speed limit'),
               AppCard(
@@ -572,43 +588,46 @@ class _PointEditorState extends State<_PointEditor> {
                 ),
               ),
 
-              const SectionLabel('Warn when driving'),
-              SegmentedControl<bool>(
-                value: oneWay,
-                onChanged: (one) => _setDirection(one ? _lastDirection : null),
-                segments: const [
-                  Segment(false, 'Both ways'),
-                  Segment(true, 'One way'),
-                ],
-              ),
-              AnimatedSize(
-                duration: const Duration(milliseconds: 220),
-                curve: Curves.easeOutCubic,
-                alignment: Alignment.topCenter,
-                child: oneWay
-                    ? Padding(
-                        padding: const EdgeInsets.only(top: Space.lg),
-                        child: Column(
-                          children: [
-                            CompassPicker(
-                              value: _direction,
-                              onChanged: _setDirection,
-                            ),
-                            if (myCourse != null) ...[
-                              const SizedBox(height: Space.md),
-                              AppChip(
-                                icon: Icons.navigation_rounded,
-                                label:
-                                    'My direction · ${compassName(myCourse)}',
-                                selected: _direction == myCourse,
-                                onTap: () => _setDirection(myCourse),
+              if (!_type.temporary) ...[
+                const SectionLabel('Warn when driving'),
+                SegmentedControl<bool>(
+                  value: oneWay,
+                  onChanged: (one) =>
+                      _setDirection(one ? _lastDirection : null),
+                  segments: const [
+                    Segment(false, 'Both ways'),
+                    Segment(true, 'One way'),
+                  ],
+                ),
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                  alignment: Alignment.topCenter,
+                  child: oneWay
+                      ? Padding(
+                          padding: const EdgeInsets.only(top: Space.lg),
+                          child: Column(
+                            children: [
+                              CompassPicker(
+                                value: _direction,
+                                onChanged: _setDirection,
                               ),
+                              if (myCourse != null) ...[
+                                const SizedBox(height: Space.md),
+                                AppChip(
+                                  icon: Icons.navigation_rounded,
+                                  label:
+                                      'My direction · ${compassName(myCourse)}',
+                                  selected: _direction == myCourse,
+                                  onTap: () => _setDirection(myCourse),
+                                ),
+                              ],
                             ],
-                          ],
-                        ),
-                      )
-                    : const SizedBox(width: double.infinity),
-              ),
+                          ),
+                        )
+                      : const SizedBox(width: double.infinity),
+                ),
+              ],
 
               const SectionLabel('Note'),
               TextField(
@@ -630,7 +649,19 @@ class _PointEditorState extends State<_PointEditor> {
               ),
 
               const SectionLabel('Sharing'),
-              _buildSharing(context),
+              if (_type.temporary)
+                AppCard(
+                  padding: const EdgeInsets.all(Space.lg),
+                  child: Text(
+                    'Police radar is shared with every driver and warns both '
+                    'ways. It leaves the map after '
+                    '${policeRadarLifetime.inHours} hours, unless drivers '
+                    'confirm it is still there.',
+                    style: TextStyle(fontSize: 14, color: p.textSecondary),
+                  ),
+                )
+              else
+                _buildSharing(context),
             ],
 
             const SectionLabel('Warning sound'),

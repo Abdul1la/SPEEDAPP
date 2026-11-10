@@ -3,6 +3,9 @@ import 'package:new_project/app_controller.dart';
 import 'package:new_project/models/app_settings.dart';
 import 'package:new_project/models/speed_point.dart';
 import 'package:new_project/services/storage.dart';
+import 'package:new_project/services/voice_player.dart';
+import 'package:new_project/utils/geo.dart';
+import 'package:new_project/services/alert_engine.dart';
 
 /// Keeps everything in memory instead of on the phone.
 class _MemoryStorage extends Storage {
@@ -13,6 +16,14 @@ class _MemoryStorage extends Storage {
   Future<void> saveSettings(AppSettings s) async {}
   @override
   Future<void> saveCommunity(List<SpeedPoint> points) async {}
+}
+
+/// Plays nothing (unit tests have no audio).
+class _SilentVoice extends VoicePlayer {
+  @override
+  void announce(AlertEvent e) {}
+  @override
+  Future<void> stopAll() async {}
 }
 
 const _point = SpeedPoint(
@@ -132,4 +143,26 @@ void main() {
       expect(restored.cameraDistances, [400]);
     },
   );
+
+  test('standing still right at a camera: no endless "0 m" warning', () async {
+    // About the banner, not the sound (no audio in unit tests).
+    final app = AppController(storage: _MemoryStorage(), voice: _SilentVoice());
+    await app.addPoint(_point);
+    var t = DateTime(2026, 1, 1);
+    // Drive north towards it.
+    for (var m = 400.0; m >= 20; m -= 10) {
+      final (lat, lng) = destinationPoint(_point.lat, _point.lng, 180, m);
+      app.debugGpsFix(
+        DriveSample(lat: lat, lng: lng, speedMps: 10, heading: 0, time: t),
+      );
+      t = t.add(const Duration(seconds: 1));
+    }
+    expect(app.active?.point.id, 'p1');
+    // Parked right there: the banner goes away.
+    final (lat, lng) = destinationPoint(_point.lat, _point.lng, 180, 5);
+    app.debugGpsFix(
+      DriveSample(lat: lat, lng: lng, speedMps: 0, time: t, stationary: true),
+    );
+    expect(app.active, isNull);
+  });
 }

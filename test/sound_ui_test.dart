@@ -84,17 +84,17 @@ void main() {
     await tester.scrollUntilVisible(find.text('Chime + voice'), 300);
     await tester.pumpAndSettle();
 
-    // Cameras: pick "Alert" from the built-in sounds.
+    // Cameras: pick "Radar" from the built-in sounds.
     await tester.tap(find.text('Chime + voice'));
     await tester.pumpAndSettle();
     expect(find.text('Built-in sounds'), findsOneWidget);
     expect(find.text('Two rising bells · default'), findsOneWidget);
     expect(find.text('From your phone'), findsOneWidget);
-    await tester.tap(find.text('Alert'));
+    await tester.tap(find.text('Radar'));
     await tester.pumpAndSettle();
-    expect(app.settings.toneFor(PointType.camera), WarningTone.alert);
-    expect(storage.settings?.toneFor(PointType.camera), WarningTone.alert);
-    expect(find.text('Alert + voice'), findsOneWidget);
+    expect(app.settings.toneFor(PointType.camera), WarningTone.radar);
+    expect(storage.settings?.toneFor(PointType.camera), WarningTone.radar);
+    expect(find.text('Radar + voice'), findsOneWidget);
 
     // Bumps: the phone voice only.
     await tester.ensureVisible(find.text('Bump-bump + voice'));
@@ -114,7 +114,7 @@ void main() {
     await tester.tap(speak);
     await tester.pumpAndSettle();
     expect(app.settings.speakDistance, isFalse);
-    expect(find.text('Alert'), findsOneWidget);
+    expect(find.text('Radar'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

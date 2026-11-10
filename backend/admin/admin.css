@@ -120,6 +120,7 @@ h2 { margin: 0 0 14px; font-size: 20px; }
 }
 .tag.camera { color: var(--camera); }
 .tag.bump { color: var(--bump); }
+.tag.mobile { color: #2563eb; }
 .tag.active { color: var(--success); }
 .tag.hidden { color: var(--warning); }
 .tag.removed, .tag.banned { color: var(--danger); }

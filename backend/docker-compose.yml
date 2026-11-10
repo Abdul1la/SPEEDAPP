@@ -37,6 +37,8 @@ services:
       HOST: 0.0.0.0
       TRUST_PROXY: ${TRUST_PROXY:-false}
       MAX_POINTS_PER_DAY: ${MAX_POINTS_PER_DAY:-100}
+      GOOGLE_PLACES_KEY: ${GOOGLE_PLACES_KEY:-}
+      SEARCH_COUNTRY: ${SEARCH_COUNTRY:-iq}
     ports:
       - "3000:3000"
 

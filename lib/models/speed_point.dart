@@ -3,9 +3,18 @@ import 'custom_sound.dart';
 /// A place on the road the driver should be warned about.
 enum PointType {
   camera('camera', 'Speed camera'),
-  bump('bump', 'Speed bump');
+  bump('bump', 'Speed bump'),
+
+  /// A mobile speed camera or a police car with one. It moves from day to
+  /// day, so it leaves the map by itself ([SpeedPoint.expiresAt]) unless
+  /// drivers confirm it. Found automatically (drivers suddenly slowed down
+  /// there) or reported by a driver.
+  mobile('mobile', 'Police radar');
 
   const PointType(this.key, this.label);
+
+  /// Leaves the map by itself after a while.
+  bool get temporary => this == mobile;
 
   /// Short stable id, used in saved data and in sound file names
   /// (e.g. `assets/sounds/camera_300.mp3`).
@@ -36,6 +45,11 @@ class SpeedPoint {
     this.gones = 0,
     this.myVote,
     this.dirty = false,
+    this.expiresAt,
+    this.auto = false,
+    this.slowdowns = 0,
+    this.createdAt,
+    this.lastConfirmedAt,
   });
 
   /// Builds a point from the server's JSON. [local] is this phone's copy, whose
@@ -62,6 +76,11 @@ class SpeedPoint {
       confirms: (json['confirmCount'] as num?)?.round() ?? 0,
       gones: (json['goneCount'] as num?)?.round() ?? 0,
       myVote: json['myVote'] as String?,
+      expiresAt: _date(json['expiresAt']),
+      auto: json['auto'] == true,
+      slowdowns: (json['slowdownCount'] as num?)?.round() ?? 0,
+      createdAt: _date(json['createdAt']),
+      lastConfirmedAt: _date(json['lastConfirmedAt']),
     );
   }
 
@@ -108,6 +127,28 @@ class SpeedPoint {
   /// Changed on this phone and not uploaded yet.
   final bool dirty;
 
+  // ---- Police radar (see [PointType.mobile]) ----
+
+  /// When it leaves the map unless confirmed again. Null: never.
+  final DateTime? expiresAt;
+
+  /// Found automatically (several drivers suddenly slowed down here), not
+  /// reported by a driver.
+  final bool auto;
+
+  /// Different drivers who suddenly slowed down here.
+  final int slowdowns;
+
+  /// When it was added, and last confirmed "still there".
+  final DateTime? createdAt;
+  final DateTime? lastConfirmedAt;
+
+  /// Past [expiresAt]: no longer shown or warned about.
+  bool isExpired([DateTime? now]) {
+    final end = expiresAt;
+    return end != null && !end.isAfter(now ?? DateTime.now());
+  }
+
   SpeedPoint copyWith({
     PointType? type,
     double? lat,
@@ -124,6 +165,7 @@ class SpeedPoint {
     int? gones,
     String? Function()? myVote,
     bool? dirty,
+    DateTime? Function()? expiresAt,
   }) {
     return SpeedPoint(
       id: id,
@@ -142,6 +184,11 @@ class SpeedPoint {
       gones: gones ?? this.gones,
       myVote: myVote != null ? myVote() : this.myVote,
       dirty: dirty ?? this.dirty,
+      expiresAt: expiresAt != null ? expiresAt() : this.expiresAt,
+      auto: auto,
+      slowdowns: slowdowns,
+      createdAt: createdAt,
+      lastConfirmedAt: lastConfirmedAt,
     );
   }
 
@@ -162,6 +209,11 @@ class SpeedPoint {
     gones: gones,
     myVote: myVote,
     dirty: dirty,
+    expiresAt: expiresAt,
+    auto: auto,
+    slowdowns: slowdowns,
+    createdAt: createdAt,
+    lastConfirmedAt: lastConfirmedAt,
   );
 
   /// A copy that belongs to this phone only (for imported lists): no server
@@ -178,6 +230,7 @@ class SpeedPoint {
     repeat: repeat,
     shared: shared,
     dirty: true,
+    expiresAt: expiresAt,
   );
 
   /// The fields the server stores (for uploading).
@@ -220,6 +273,12 @@ class SpeedPoint {
     if (gones > 0) 'gone': gones,
     if (myVote != null) 'vote': myVote,
     if (dirty) 'dirty': true,
+    if (expiresAt != null) 'expires': expiresAt!.toUtc().toIso8601String(),
+    if (auto) 'auto': true,
+    if (slowdowns > 0) 'slow': slowdowns,
+    if (createdAt != null) 'at': createdAt!.toUtc().toIso8601String(),
+    if (lastConfirmedAt != null)
+      'okAt': lastConfirmedAt!.toUtc().toIso8601String(),
   };
 
   factory SpeedPoint.fromJson(Map<String, dynamic> json, {String? fallbackId}) {
@@ -245,12 +304,23 @@ class SpeedPoint {
       gones: (json['gone'] as num?)?.round() ?? 0,
       myVote: json['vote'] as String?,
       dirty: json['dirty'] == true,
+      expiresAt: _date(json['expires']),
+      auto: json['auto'] == true,
+      slowdowns: (json['slow'] as num?)?.round() ?? 0,
+      createdAt: _date(json['at']),
+      lastConfirmedAt: _date(json['okAt']),
     );
   }
 }
 
+DateTime? _date(Object? v) => v is String ? DateTime.tryParse(v) : null;
+
 /// Longest note the server keeps.
 const int maxNoteLength = 200;
+
+/// How long a police radar stays on the map after the last report or
+/// confirmation (the server's `RULES.mobileLifetimeMin`).
+const Duration policeRadarLifetime = Duration(hours: 2);
 
 int _idCounter = 0;
 

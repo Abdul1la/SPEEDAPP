@@ -63,6 +63,13 @@ class SettingsScreen extends StatelessWidget {
                           onChanged: (v) =>
                               app.updateSettings(s.copyWith(bumpDistances: v)),
                         ),
+                        _DistanceRow(
+                          type: PointType.mobile,
+                          values: s.mobileDistances,
+                          onChanged: (v) => app.updateSettings(
+                            s.copyWith(mobileDistances: v),
+                          ),
+                        ),
                         _ToleranceRow(
                           value: s.overSpeedTolerance,
                           onChanged: (v) => app.updateSettings(
@@ -133,6 +140,7 @@ class SettingsScreen extends StatelessWidget {
                       ],
                     ),
                     _SoundsSection(app: app),
+                    _RadarSection(app: app),
                     _PointsSection(app: app),
                     const SizedBox(height: Space.xl),
                     Center(
@@ -640,6 +648,7 @@ class _SoundsSection extends StatelessWidget {
       children: [
         _TypeSounds(app: app, type: PointType.camera),
         _TypeSounds(app: app, type: PointType.bump),
+        _TypeSounds(app: app, type: PointType.mobile),
         _SwitchRow(
           icon: Icons.record_voice_over_rounded,
           color: const Color(0xFF0EA5E9),
@@ -649,6 +658,39 @@ class _SoundsSection extends StatelessWidget {
           onChanged: (v) => app.updateSettings(s.copyWith(speakDistance: v)),
         ),
         _SlowDownSound(app: app),
+      ],
+    );
+  }
+}
+
+/// Police radar (mobile speed cameras, police cars with a camera): found
+/// automatically from drivers' sudden slowdowns.
+class _RadarSection extends StatelessWidget {
+  const _RadarSection({required this.app});
+  final AppController app;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final s = app.settings;
+    return _Group(
+      title: 'Police radar',
+      footer:
+          'When you suddenly slow down on a fast road without stopping (like '
+          'drivers do for a police radar), only that spot is sent, never your '
+          'route. When several drivers slow down at the same new spot, every '
+          'driver is warned. After you pass a police radar, tap "Still there" '
+          'or "Not there" to keep the map right. Reports leave the map after '
+          '${policeRadarLifetime.inHours} hours unless drivers confirm them.',
+      children: [
+        _SwitchRow(
+          icon: Icons.local_police_rounded,
+          color: p.radar,
+          title: 'Find police radar automatically',
+          subtitle: 'Share sudden slowdowns (no route, no name)',
+          value: s.findRadar,
+          onChanged: (v) => app.updateSettings(s.copyWith(findRadar: v)),
+        ),
       ],
     );
   }
@@ -918,7 +960,7 @@ class _PointsSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final p = context.palette;
     final cams = app.points.where((x) => x.type == PointType.camera).length;
-    final bumps = app.points.length - cams;
+    final bumps = app.points.where((x) => x.type == PointType.bump).length;
     final messenger = ScaffoldMessenger.of(context);
     final chevron = Icon(Icons.chevron_right_rounded, color: p.textTertiary);
 
@@ -1038,7 +1080,11 @@ class _Stat extends StatelessWidget {
                 Text('$count', style: numberStyle(24, color: p.text)),
                 const SizedBox(height: 2),
                 Text(
-                  type == PointType.camera ? 'Cameras' : 'Speed bumps',
+                  switch (type) {
+                    PointType.camera => 'Cameras',
+                    PointType.bump => 'Speed bumps',
+                    PointType.mobile => 'Police radar',
+                  },
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(fontSize: 13, color: p.textSecondary),

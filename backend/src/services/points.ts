@@ -4,7 +4,9 @@ import type { Db, Queryable } from '../db.ts';
 import { badRequest, conflict, forbidden, notFound, tooMany } from '../lib/errors.ts';
 import { GEOM, angleDifference, boxWkt, distanceMeters, pointWkt } from '../lib/geo.ts';
 
-export type PointType = 'camera' | 'bump';
+/** 'mobile': police radar (a mobile speed camera or a police car with one),
+ * reported by drivers; it moves from day to day, so it expires. */
+export type PointType = 'camera' | 'bump' | 'mobile';
 export type Visibility = 'public' | 'private';
 export type PointStatus = 'active' | 'hidden' | 'removed';
 export type StatusReason = 'votes' | 'reports' | 'moderator' | 'owner';
@@ -29,7 +31,20 @@ export const RULES = {
   maxResults: 10_000,
   /** Changes are re-sent this long before the client's cursor, so none are missed. */
   syncOverlapS: 60,
+  /** Police radar: shown this long after the last report or confirmation. */
+  mobileLifetimeMin: 120,
+  /** Police radar: a report this close to an active one is the same radar
+   * (drivers tap while moving, so reports land further apart). */
+  mobileMergeRadiusM: 100,
+  /** Police radar: "not there" votes since the last confirmation that take it
+   * off the map (it moves, so old confirmations don't count). */
+  mobileGoneToHide: 2,
 };
+
+/** True for reports that expire (police radar). */
+export function isTemporary(type: PointType): boolean {
+  return type === 'mobile';
+}
 
 export interface PointRow {
   id: number;
@@ -42,13 +57,17 @@ export interface PointRow {
   visibility: Visibility;
   status: PointStatus;
   status_reason: StatusReason | null;
+  /** Police radar: off the map after this. */
+  expires_at: Date | null;
   confirm_count: number;
   gone_count: number;
   report_count: number;
   last_confirmed_at: Date | null;
   created_by: number | null;
   client_id: string | null;
-  source: 'app' | 'import' | 'admin';
+  source: 'app' | 'import' | 'admin' | 'auto';
+  /** Police radar: different drivers who suddenly slowed down here. */
+  slowdown_count: number;
   created_at: Date;
   updated_at: Date;
   my_vote?: Vote | null;
@@ -67,6 +86,12 @@ export interface ApiPoint {
   confirmCount: number;
   goneCount: number;
   lastConfirmedAt: string | null;
+  /** Police radar: when it leaves the map unless confirmed again. */
+  expiresAt: string | null;
+  /** Police radar found automatically (drivers slowed down), not reported. */
+  auto: boolean;
+  /** Police radar: different drivers who suddenly slowed down here. */
+  slowdownCount: number;
   /** True if the viewer added it (they can edit and delete it). */
   mine: boolean;
   myVote: Vote | null;
@@ -78,8 +103,8 @@ export interface ApiPoint {
 
 export const POINT_COLUMNS =
   'p.id, p.type, p.lat, p.lng, p.speed_limit, p.direction, p.note, p.visibility, ' +
-  'p.status, p.status_reason, p.confirm_count, p.gone_count, p.report_count, ' +
-  'p.last_confirmed_at, p.created_by, p.client_id, p.source, p.created_at, p.updated_at';
+  'p.status, p.status_reason, p.expires_at, p.confirm_count, p.gone_count, p.report_count, ' +
+  'p.slowdown_count, p.last_confirmed_at, p.created_by, p.client_id, p.source, p.created_at, p.updated_at';
 
 /** SELECT of points with the viewer's vote (first parameter: viewer id). */
 function selectPoints(where: string): string {
@@ -104,6 +129,9 @@ export function toApiPoint(row: PointRow, viewerId: number | null): ApiPoint {
     confirmCount: row.confirm_count,
     goneCount: row.gone_count,
     lastConfirmedAt: row.last_confirmed_at?.toISOString() ?? null,
+    expiresAt: row.expires_at?.toISOString() ?? null,
+    auto: row.source === 'auto',
+    slowdownCount: row.slowdown_count,
     mine,
     myVote: row.my_vote ?? null,
     ...(mine ? { clientId: row.client_id } : {}),
@@ -113,9 +141,10 @@ export function toApiPoint(row: PointRow, viewerId: number | null): ApiPoint {
 }
 
 /** Can [viewerId] see this point on their map? */
-export function isVisible(row: PointRow, viewerId: number): boolean {
+export function isVisible(row: PointRow, viewerId: number, now: Date = new Date()): boolean {
   return (
     row.status === 'active' &&
+    (row.expires_at == null || row.expires_at > now) &&
     (row.visibility === 'public' || row.created_by === viewerId)
   );
 }
@@ -203,14 +232,43 @@ export async function recountPoints(conn: Queryable, ids: number[]): Promise<voi
   await execute(
     conn,
     `UPDATE points SET status = 'hidden', status_reason = 'votes'
-      WHERE id IN (?) AND status = 'active' AND gone_count >= ? AND gone_count > confirm_count + 1`,
+      WHERE id IN (?) AND type <> 'mobile' AND status = 'active'
+        AND gone_count >= ? AND gone_count > confirm_count + 1`,
     [list, RULES.goneVotesToHide],
   );
   await execute(
     conn,
     `UPDATE points SET status = 'active', status_reason = NULL
-      WHERE id IN (?) AND status = 'hidden' AND status_reason = 'votes' AND gone_count <= confirm_count + 1`,
+      WHERE id IN (?) AND type <> 'mobile' AND status = 'hidden' AND status_reason = 'votes'
+        AND gone_count <= confirm_count + 1`,
     [list],
+  );
+  // Police radar moves: only "not there" votes since the last confirmation
+  // count, so one taken away this afternoon goes even if many drivers
+  // confirmed it this morning; a new confirmation brings it back.
+  const goneSinceConfirmed = `(SELECT COUNT(*) FROM point_votes v
+      WHERE v.point_id = p.id AND v.vote = 'gone'
+        AND v.updated_at > COALESCE(p.last_confirmed_at, p.created_at))`;
+  await execute(
+    conn,
+    `UPDATE points p SET p.status = 'hidden', p.status_reason = 'votes'
+      WHERE p.id IN (?) AND p.type = 'mobile' AND p.status = 'active' AND ${goneSinceConfirmed} >= ?`,
+    [list, RULES.mobileGoneToHide],
+  );
+  await execute(
+    conn,
+    `UPDATE points p SET p.status = 'active', p.status_reason = NULL
+      WHERE p.id IN (?) AND p.type = 'mobile' AND p.status = 'hidden' AND p.status_reason = 'votes'
+        AND ${goneSinceConfirmed} < ?`,
+    [list, RULES.mobileGoneToHide],
+  );
+  // Each confirmation keeps a police radar on the map a while longer.
+  await execute(
+    conn,
+    `UPDATE points SET expires_at = GREATEST(COALESCE(expires_at, last_confirmed_at),
+                                             last_confirmed_at + INTERVAL ? MINUTE)
+      WHERE id IN (?) AND type = 'mobile' AND last_confirmed_at IS NOT NULL`,
+    [RULES.mobileLifetimeMin, list],
   );
   await execute(
     conn,
@@ -276,8 +334,17 @@ async function insertPoint(
   maxPerDay: number,
 ): Promise<CreateResult> {
   const cols = pointColumns(input);
-  const visibility = input.visibility ?? 'public';
+  const temporary = isTemporary(input.type);
+  if (temporary) {
+    // Police radar is for everyone, and warns both ways (a radar gun checks
+    // either side of the road).
+    cols.visibility = 'public';
+    cols.direction = null;
+    cols.expires_at = new Date(Date.now() + RULES.mobileLifetimeMin * 60_000);
+  }
+  const visibility = temporary ? 'public' : (input.visibility ?? 'public');
   const direction = (cols.direction as number | null | undefined) ?? null;
+  const mergeRadius = temporary ? RULES.mobileMergeRadiusM : RULES.mergeRadiusM;
   return transaction(db, async (conn) => {
     // Upload retried by the phone: return what was saved the first time.
     if (input.clientId) {
@@ -308,11 +375,12 @@ async function insertPoint(
         `SELECT p.id, p.direction, p.created_by FROM points p
           WHERE p.type = ? AND p.visibility = 'public'
             AND (p.status = 'active' OR (p.status = 'hidden' AND p.status_reason = 'votes'))
+            AND (p.expires_at IS NULL OR p.expires_at > CURRENT_TIMESTAMP(3))
             AND MBRContains(${GEOM}, p.location)
             AND ST_Distance_Sphere(p.location, ${GEOM}) <= ?
           ORDER BY ST_Distance_Sphere(p.location, ${GEOM})
           LIMIT 5 FOR UPDATE`,
-        [input.type, boxWkt(input.lat, input.lng, RULES.mergeRadiusM * 2), center, RULES.mergeRadiusM, center],
+        [input.type, boxWkt(input.lat, input.lng, mergeRadius * 2), center, mergeRadius, center],
       );
       const same = near.find(
         (n) =>
@@ -363,6 +431,14 @@ export async function updatePoint(
       throw forbidden('not_owner', 'Only the driver who added this point can change it.');
     }
     const cols = pointColumns(input);
+    if (input.type !== undefined && isTemporary(input.type) !== isTemporary(row.type)) {
+      throw badRequest('wrong_type', 'A police radar report can\'t become a fixed point, or the other way round.');
+    }
+    if (isTemporary(row.type)) {
+      // Always shared, always both ways.
+      delete cols.visibility;
+      delete cols.direction;
+    }
     // Other drivers rely on a point they confirmed: it can't be taken away
     // by making it private or moving it far.
     const others = await othersConfirmed(conn, id, user.id);
@@ -523,13 +599,21 @@ export async function nearby(
   const params: unknown[] = [user.id, boxWkt(q.lat, q.lng, radius), center, radius];
   if (q.since) {
     const since = new Date(q.since.getTime() - RULES.syncOverlapS * 1000);
-    // Other drivers' private points are never sent, not even their ids,
-    // except ones made private since (phones that saw them must remove them).
-    where.push('p.updated_at > ?', "(p.visibility = 'public' OR p.created_by = ? OR p.unshared_at > ?)");
-    params.push(since, user.id, since);
+    // Changed since, or a police radar that expired since (phones must
+    // remove it). Other drivers' private points are never sent, not even
+    // their ids, except ones made private since.
+    where.push(
+      '(p.updated_at > ? OR (p.expires_at > ? AND p.expires_at <= ?))',
+      "(p.visibility = 'public' OR p.created_by = ? OR p.unshared_at > ?)",
+    );
+    params.push(since, since, now, user.id, since);
   } else {
-    where.push("p.status = 'active'", "(p.visibility = 'public' OR p.created_by = ?)");
-    params.push(user.id);
+    where.push(
+      "p.status = 'active'",
+      '(p.expires_at IS NULL OR p.expires_at > ?)',
+      "(p.visibility = 'public' OR p.created_by = ?)",
+    );
+    params.push(now, user.id);
   }
   const order = q.since ? ' ORDER BY p.updated_at, p.id' : '';
   const rows = await select<PointRow>(db, `${selectPoints(where.join(' AND '))}${order} LIMIT ?`, [
@@ -540,7 +624,7 @@ export async function nearby(
   const points: ApiPoint[] = [];
   const removed: string[] = [];
   for (const row of rows) {
-    if (isVisible(row, user.id)) points.push(toApiPoint(row, user.id));
+    if (isVisible(row, user.id, now)) points.push(toApiPoint(row, user.id));
     else removed.push(String(row.id));
   }
   // When a delta was cut short, continue from the last change sent.

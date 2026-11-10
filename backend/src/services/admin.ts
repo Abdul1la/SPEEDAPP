@@ -98,6 +98,8 @@ export async function stats(db: Db) {
               COALESCE(SUM(status = 'removed'), 0) AS removed,
               COALESCE(SUM(status = 'active' AND type = 'camera'), 0) AS cameras,
               COALESCE(SUM(status = 'active' AND type = 'bump'), 0) AS bumps,
+              COALESCE(SUM(status = 'active' AND type = 'mobile'
+                           AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP(3))), 0) AS mobiles,
               COALESCE(SUM(status = 'active' AND visibility = 'private'), 0) AS private
          FROM points`,
     ),
