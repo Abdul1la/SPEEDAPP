@@ -7,6 +7,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../app_controller.dart';
 import '../map/map_styles.dart';
+import '../map/car_turn.dart';
 import '../map/marker_icons.dart';
 import '../models/app_settings.dart';
 import '../models/route_plan.dart';
@@ -39,7 +40,8 @@ class MapScreen extends StatefulWidget {
   State<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> {
+class _MapScreenState extends State<MapScreen>
+    with SingleTickerProviderStateMixin {
   // Where the map starts before the first GPS fix.
   static const _fallbackCamera = CameraPosition(
     target: LatLng(30, 30),
@@ -63,6 +65,19 @@ class _MapScreenState extends State<MapScreen> {
   Object? _lastFollowed;
   double _bearing = 0;
   late final AppLifecycleListener _lifecycle;
+
+  /// The car's angle on the map as shown now. It turns smoothly to each new
+  /// driving direction (see [CarTurn]), ahead of the map's own turn.
+  double? _carAngle;
+  CarTurn? _turn;
+  late final AnimationController _carTurn =
+      AnimationController(vsync: this, duration: CarTurn.duration)
+        ..addListener(() {
+          final turn = _turn;
+          if (turn != null && mounted) {
+            setState(() => _carAngle = turn.at(_carTurn.value));
+          }
+        });
 
   /// Choosing a route: the sheet covers the bottom half of the map.
   bool _planning = false;
@@ -100,11 +115,27 @@ class _MapScreenState extends State<MapScreen> {
     _messages?.cancel();
     app.removeListener(_onAppChanged);
     _lifecycle.dispose();
+    _carTurn.dispose();
     super.dispose();
+  }
+
+  /// Turns the car to [angle] smoothly, the short way round.
+  void _turnCarTo(double? angle) {
+    if (angle == null) return;
+    final shown = _carAngle;
+    if (shown == null) {
+      _carAngle = angle; // first fix: no turn
+      return;
+    }
+    final aim = _turn != null && _carTurn.isAnimating ? _turn!.to : shown;
+    if (shortestTurn(aim, angle).abs() < 0.5) return; // already there
+    _turn = CarTurn(shown, angle);
+    _carTurn.forward(from: 0);
   }
 
   void _onAppChanged() {
     final pos = app.position;
+    _turnCarTo(app.course ?? pos?.heading);
     if (_overview) {
       if (!app.routeActive) {
         // Route ended (arrived): back to following the car.
@@ -134,6 +165,9 @@ class _MapScreenState extends State<MapScreen> {
           tilt: moving ? 45 : 0,
         ),
       ),
+      // Slower than the car's own turn (CarTurn.duration), so the car turns
+      // first and the map follows: a left turn looks left.
+      duration: const Duration(milliseconds: 1000),
     );
   }
 
@@ -485,7 +519,7 @@ class _MapScreenState extends State<MapScreen> {
           position: LatLng(pos.lat, pos.lng),
           icon: _icons.car!,
           flat: true,
-          rotation: app.course ?? pos.heading ?? 0,
+          rotation: _carAngle ?? app.course ?? pos.heading ?? 0,
           anchor: const Offset(0.5, 0.5),
           alpha: app.isSimulating || app.livePosition != null ? 1 : 0.55,
           zIndexInt: 10,

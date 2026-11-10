@@ -44,8 +44,15 @@ class SpeedFilter {
     // No speed from the phone: use how far we moved.
     if (speed <= 0 && moved != null) speed = moved.speed;
 
-    // The phone itself says the number is mostly noise.
-    if (speedAccuracyMps > 0 && speed < 2 * speedAccuracyMps) speed = 0;
+    // The phone itself says the number is mostly noise: 0, unless the
+    // position clearly moved (weak signal between buildings while driving
+    // slowly), and then the movement is the speed.
+    if (speedAccuracyMps > 0 && speed < 2 * speedAccuracyMps) {
+      final clearlyMoving =
+          moved != null &&
+          moved.distance >= 2 * math.max(minMove, moved.accuracy);
+      speed = clearlyMoving ? moved.speed : 0;
+    }
 
     // Hardly moved over the last seconds: standing still.
     if (moved != null && moved.distance < math.max(minMove, moved.accuracy)) {

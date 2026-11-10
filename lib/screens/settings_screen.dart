@@ -12,160 +12,704 @@ import '../theme/app_theme.dart';
 import '../widgets/sound_controls.dart';
 import '../widgets/ui.dart';
 
-/// Settings, laid out like iOS Settings: grouped lists with colored
-/// icon squares, plain labels, switches and chips.
-class SettingsScreen extends StatelessWidget {
+/// The parts of Settings, each on its own page.
+enum SettingsSection {
+  warnings('Warnings', Icons.notifications_active_rounded, Color(0xFFFF3B30)),
+  sounds('Warning sounds', Icons.volume_up_rounded, Color(0xFFFF2D55)),
+  map('Map & screen', Icons.map_rounded, Color(0xFF34C759)),
+  radar('Police radar', Icons.local_police_rounded, Color(0xFF5856D6)),
+  points('Your points', Icons.place_rounded, Color(0xFFFF9500)),
+  account('Account & backup', Icons.cloud_rounded, Color(0xFF007AFF));
+
+  const SettingsSection(this.title, this.icon, this.color);
+  final String title;
+  final IconData icon;
+  final Color color;
+}
+
+/// Settings: a short home page (account, quick switches, sections), with
+/// each section on its own page. On wide screens (tablets, landscape) the
+/// sections stay on the left and the open one shows on the right.
+class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key, required this.app});
 
   final AppController app;
+
+  /// From this width the sections list and the open section sit side by side.
+  static const twoPaneWidth = 840.0;
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  SettingsSection _open = SettingsSection.warnings;
+
+  AppController get app => widget.app;
+
+  void _openPage(BuildContext context, SettingsSection section) {
+    Navigator.push(
+      context,
+      MaterialPageRoute<void>(
+        builder: (_) => _SectionPage(app: app, section: section),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
     return Scaffold(
-      body: ListenableBuilder(
-        listenable: app,
-        builder: (context, _) {
-          final s = app.settings;
-          return CustomScrollView(
-            slivers: [
-              SliverAppBar.large(
-                title: const Text('Settings'),
-                backgroundColor: p.bg,
-                surfaceTintColor: Colors.transparent,
-              ),
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(
-                  Space.lg,
-                  0,
-                  Space.lg,
-                  Space.xxl * 2,
+      backgroundColor: p.bg,
+      body: LayoutBuilder(
+        builder: (context, box) {
+          final wide = box.maxWidth >= SettingsScreen.twoPaneWidth;
+          return ListenableBuilder(
+            listenable: app,
+            builder: (context, _) {
+              final home = _Home(
+                app: app,
+                selected: wide ? _open : null,
+                onOpen: (section) => wide
+                    ? setState(() => _open = section)
+                    : _openPage(context, section),
+              );
+              if (!wide) return home;
+              return Row(
+                children: [
+                  SizedBox(width: 380, child: home),
+                  VerticalDivider(width: 1, thickness: 1, color: p.border),
+                  Expanded(
+                    child: _SectionPage(
+                      key: ValueKey(_open),
+                      app: app,
+                      section: _open,
+                      embedded: true,
+                    ),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Side padding that keeps content at a readable width on big screens.
+EdgeInsets _readable(double width, {double top = 0, double bottom = 0}) {
+  const maxContent = 680.0;
+  final side = width > maxContent + 2 * Space.lg
+      ? (width - maxContent) / 2
+      : Space.lg;
+  return EdgeInsets.fromLTRB(side, top, side, bottom);
+}
+
+/// Settings home: account, quick switches, the sections, about.
+class _Home extends StatelessWidget {
+  const _Home({required this.app, required this.onOpen, this.selected});
+
+  final AppController app;
+  final ValueChanged<SettingsSection> onOpen;
+
+  /// The section shown next to the list (wide screens), highlighted.
+  final SettingsSection? selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final s = app.settings;
+    void set(AppSettings next) {
+      HapticFeedback.selectionClick();
+      app.updateSettings(next);
+    }
+
+    return LayoutBuilder(
+      builder: (context, box) => CustomScrollView(
+        slivers: [
+          SliverAppBar.large(
+            title: const Text('Settings'),
+            backgroundColor: p.bg,
+            surfaceTintColor: Colors.transparent,
+          ),
+          SliverPadding(
+            padding: _readable(box.maxWidth, bottom: Space.xxl * 2),
+            sliver: SliverList.list(
+              children: [
+                _AccountCard(
+                  app: app,
+                  onTap: () => onOpen(SettingsSection.account),
                 ),
-                sliver: SliverList.list(
+                const SectionLabel(
+                  'Quick settings',
+                  padding: EdgeInsets.fromLTRB(
+                    Space.lg,
+                    Space.xxl,
+                    Space.lg,
+                    Space.sm,
+                  ),
+                ),
+                _QuickGrid(
+                  tiles: [
+                    _QuickToggle(
+                      icon: s.muted
+                          ? Icons.volume_off_rounded
+                          : Icons.record_voice_over_rounded,
+                      color: const Color(0xFFFF2D55),
+                      label: 'Voice warnings',
+                      on: !s.muted,
+                      onChanged: (v) => set(s.copyWith(muted: !v)),
+                    ),
+                    _QuickToggle(
+                      icon: Icons.light_mode_rounded,
+                      color: const Color(0xFFFF9500),
+                      label: 'Keep screen on',
+                      on: s.keepScreenOn,
+                      onChanged: (v) => set(s.copyWith(keepScreenOn: v)),
+                    ),
+                    _QuickToggle(
+                      icon: Icons.local_police_rounded,
+                      color: p.radar,
+                      label: 'Find police radar',
+                      on: s.findRadar,
+                      onChanged: (v) => set(s.copyWith(findRadar: v)),
+                    ),
+                    _QuickToggle(
+                      icon: Icons.public_rounded,
+                      color: p.success,
+                      label: 'Share new points',
+                      on: s.sharePoints,
+                      onChanged: (v) => set(s.copyWith(sharePoints: v)),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: Space.xxl),
+                AppCard(
+                  radius: Radii.lg,
+                  child: Column(
+                    children: [
+                      for (final section in SettingsSection.values) ...[
+                        if (section != SettingsSection.values.first)
+                          const Divider(indent: 60),
+                        _SectionRow(
+                          section: section,
+                          summary: _summary(section, app),
+                          selected: section == selected,
+                          onTap: () => onOpen(section),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(height: Space.xxl),
+                const _About(),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _distances(List<int> meters) => meters
+    .map(
+      (d) => d >= 1000
+          ? '${(d / 1000).toStringAsFixed(d % 1000 == 0 ? 0 : 1)} km'
+          : '$d',
+    )
+    .join(', ');
+
+/// One line under each section: what it is set to now.
+String _summary(SettingsSection section, AppController app) {
+  final s = app.settings;
+  int count(PointType t) => app.points.where((x) => x.type == t).length;
+  String plural(int n, String one) => '$n $one${n == 1 ? '' : 's'}';
+  switch (section) {
+    case SettingsSection.warnings:
+      final camera = _distances(s.cameraDistances);
+      return 'Cameras $camera m · over limit +${s.overSpeedTolerance} km/h';
+    case SettingsSection.sounds:
+      if (s.muted) return 'Voice warnings are off';
+      final tone = describeTone(
+        s.toneFor(PointType.camera),
+        speakDistance: s.speakDistance,
+      );
+      return 'Cameras: $tone';
+    case SettingsSection.map:
+      final look = switch (s.mapLook) {
+        MapLook.auto => 'Automatic look',
+        MapLook.light => 'Light map',
+        MapLook.dark => 'Dark map',
+        MapLook.standard => 'Google map',
+      };
+      return '$look · ${s.keepScreenOn ? 'screen stays on' : 'screen may sleep'}';
+    case SettingsSection.radar:
+      return s.findRadar ? 'Found automatically from slowdowns' : 'Off';
+    case SettingsSection.points:
+      final cams = count(PointType.camera);
+      final bumps = count(PointType.bump);
+      if (cams + bumps == 0) return 'None added yet';
+      return '${plural(cams, 'camera')} · ${plural(bumps, 'bump')}';
+    case SettingsSection.account:
+      final account = app.sync.account;
+      if (account != null && !account.isAnonymous) {
+        return 'Backed up to ${account.email}';
+      }
+      return 'Not backed up yet';
+  }
+}
+
+/// Sync state in words, and the color of its dot.
+(String, Color) _syncStatus(BuildContext context, AppController app) {
+  final p = context.palette;
+  final sync = app.sync;
+  final pending = sync.pending;
+  if (sync.syncing) return ('Syncing…', p.primary);
+  if (sync.error != null) return (sync.error!, p.warning);
+  if (sync.lastSyncAt case final at?) {
+    final n = app.community.length;
+    final up = pending > 0
+        ? ' · $pending change${pending == 1 ? '' : 's'} to upload'
+        : '';
+    return (
+      'Synced ${_ago(at)} · $n point${n == 1 ? '' : 's'} from other drivers$up',
+      p.success,
+    );
+  }
+  return ('Not synced yet', p.textTertiary);
+}
+
+/// Who is signed in and how the backup is doing. Opens Account & backup.
+class _AccountCard extends StatelessWidget {
+  const _AccountCard({required this.app, required this.onTap});
+  final AppController app;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final sync = app.sync;
+    final account = sync.account;
+    final email = account?.email ?? sync.signedOutEmail;
+    final (status, dot) = _syncStatus(context, app);
+    return AppCard(
+      radius: Radii.lg,
+      onTap: onTap,
+      padding: const EdgeInsets.fromLTRB(
+        Space.lg,
+        Space.lg,
+        Space.sm,
+        Space.lg,
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 52,
+            height: 52,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: p.primarySoft,
+              shape: BoxShape.circle,
+            ),
+            child: email != null && email.isNotEmpty
+                ? Text(
+                    email[0].toUpperCase(),
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w700,
+                      color: p.primary,
+                    ),
+                  )
+                : Icon(Icons.smartphone_rounded, color: p.primary, size: 26),
+          ),
+          const SizedBox(width: Space.md),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  email ?? 'This phone only',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                    color: p.text,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _AccountSection(app: app),
-                    _Group(
-                      title: 'Warnings',
-                      footer:
-                          'Choose when the app warns you before each point. '
-                          'You can pick several distances.',
-                      children: [
-                        _DistanceRow(
-                          type: PointType.camera,
-                          values: s.cameraDistances,
-                          onChanged: (v) => app.updateSettings(
-                            s.copyWith(cameraDistances: v),
-                          ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 5),
+                      child: Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: dot,
+                          shape: BoxShape.circle,
                         ),
-                        _DistanceRow(
-                          type: PointType.bump,
-                          values: s.bumpDistances,
-                          onChanged: (v) =>
-                              app.updateSettings(s.copyWith(bumpDistances: v)),
-                        ),
-                        _DistanceRow(
-                          type: PointType.mobile,
-                          values: s.mobileDistances,
-                          onChanged: (v) => app.updateSettings(
-                            s.copyWith(mobileDistances: v),
-                          ),
-                        ),
-                        _ToleranceRow(
-                          value: s.overSpeedTolerance,
-                          onChanged: (v) => app.updateSettings(
-                            s.copyWith(overSpeedTolerance: v),
-                          ),
-                        ),
-                      ],
-                    ),
-                    _Group(
-                      title: 'Display',
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.all(Space.lg),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const _RowTitle(
-                                icon: Icons.contrast_rounded,
-                                color: Color(0xFF6366F1),
-                                title: 'Appearance',
-                                subtitle:
-                                    'Automatic: light by day, dark at night',
-                              ),
-                              const SizedBox(height: Space.lg),
-                              Row(
-                                children: [
-                                  for (final look in MapLook.values) ...[
-                                    if (look != MapLook.values.first)
-                                      const SizedBox(width: Space.sm),
-                                    Expanded(
-                                      child: _LookTile(
-                                        look: look,
-                                        selected: s.mapLook == look,
-                                        onTap: () => app.updateSettings(
-                                          s.copyWith(mapLook: look),
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
-                        _SwitchRow(
-                          icon: Icons.light_mode_outlined,
-                          color: const Color(0xFFF59E0B),
-                          title: 'Keep screen on',
-                          subtitle: 'While the app is open',
-                          value: s.keepScreenOn,
-                          onChanged: (v) =>
-                              app.updateSettings(s.copyWith(keepScreenOn: v)),
-                        ),
-                      ],
-                    ),
-                    _Group(
-                      title: 'Sound',
-                      children: [
-                        _SwitchRow(
-                          icon: Icons.volume_off_rounded,
-                          color: p.danger,
-                          title: 'Mute voice warnings',
-                          subtitle: 'The warning card still shows',
-                          value: s.muted,
-                          onChanged: (v) =>
-                              app.updateSettings(s.copyWith(muted: v)),
-                        ),
-                      ],
-                    ),
-                    _SoundsSection(app: app),
-                    _RadarSection(app: app),
-                    _PointsSection(app: app),
-                    const SizedBox(height: Space.xl),
-                    Center(
-                      child: Text(
-                        'Speed Alert 1.0',
-                        style: TextStyle(color: p.textTertiary, fontSize: 13),
                       ),
                     ),
-                    const SizedBox(height: Space.xs),
-                    // Required by the OpenStreetMap license (ODbL) for the
-                    // imported cameras and bumps.
-                    Center(
+                    const SizedBox(width: 6),
+                    Expanded(
                       child: Text(
-                        'Camera and bump data © OpenStreetMap contributors',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: p.textTertiary, fontSize: 12),
+                        status,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 13, color: p.textSecondary),
                       ),
                     ),
                   ],
                 ),
+              ],
+            ),
+          ),
+          if (sync.syncing)
+            const Padding(
+              padding: EdgeInsets.all(Space.md),
+              child: SizedBox.square(
+                dimension: 22,
+                child: CircularProgressIndicator(strokeWidth: 2.5),
+              ),
+            )
+          else
+            IconButton(
+              tooltip: 'Sync now',
+              onPressed: sync.syncNow,
+              icon: Icon(Icons.sync_rounded, color: p.primary),
+            ),
+          Icon(Icons.chevron_right_rounded, color: p.textTertiary),
+        ],
+      ),
+    );
+  }
+}
+
+/// Quick switches in a grid: 2 across on phones, 4 on wider screens.
+class _QuickGrid extends StatelessWidget {
+  const _QuickGrid({required this.tiles});
+  final List<Widget> tiles;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, box) {
+        final across = box.maxWidth >= 560 ? 4 : 2;
+        return Column(
+          children: [
+            for (var i = 0; i < tiles.length; i += across) ...[
+              if (i > 0) const SizedBox(height: Space.md),
+              IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (var j = i; j < i + across; j++) ...[
+                      if (j > i) const SizedBox(width: Space.md),
+                      Expanded(
+                        child: j < tiles.length ? tiles[j] : const SizedBox(),
+                      ),
+                    ],
+                  ],
+                ),
               ),
             ],
-          );
-        },
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// A big on / off tile: colored when on.
+class _QuickToggle extends StatelessWidget {
+  const _QuickToggle({
+    required this.icon,
+    required this.color,
+    required this.label,
+    required this.on,
+    required this.onChanged,
+  });
+
+  final IconData icon;
+  final Color color;
+  final String label;
+  final bool on;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return Semantics(
+      toggled: on,
+      button: true,
+      label: label,
+      excludeSemantics: true,
+      onTap: () => onChanged(!on),
+      child: AppCard(
+        radius: Radii.lg,
+        onTap: () => onChanged(!on),
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                IconTile(
+                  color: on ? color : p.textTertiary,
+                  icon: icon,
+                  size: 34,
+                ),
+                const Spacer(),
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 9,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: on ? color : p.fill,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    on ? 'On' : 'Off',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: on ? Colors.white : p.textSecondary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: Space.md),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: p.text,
+              ),
+            ),
+          ],
+        ),
       ),
+    );
+  }
+}
+
+/// A section on the home page: icon, name, what it is set to, chevron.
+class _SectionRow extends StatelessWidget {
+  const _SectionRow({
+    required this.section,
+    required this.summary,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final SettingsSection section;
+  final String summary;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return Semantics(
+      selected: selected,
+      child: Material(
+        color: selected ? p.primarySoft : Colors.transparent,
+        child: _Row(
+          icon: section.icon,
+          color: section.color,
+          title: section.title,
+          subtitle: summary,
+          onTap: onTap,
+          trailing: Icon(Icons.chevron_right_rounded, color: p.textTertiary),
+        ),
+      ),
+    );
+  }
+}
+
+/// One section's settings: its own page on phones, the right side on
+/// tablets ([embedded]).
+class _SectionPage extends StatelessWidget {
+  const _SectionPage({
+    super.key,
+    required this.app,
+    required this.section,
+    this.embedded = false,
+  });
+
+  final AppController app;
+  final SettingsSection section;
+  final bool embedded;
+
+  List<Widget> _content(BuildContext context) {
+    final p = context.palette;
+    final s = app.settings;
+    void set(AppSettings next) => app.updateSettings(next);
+    switch (section) {
+      case SettingsSection.warnings:
+        return [
+          _Group(
+            title: 'Warn me before',
+            footer:
+                'Pick one or more distances for each kind of point. '
+                'The app warns you at each of them.',
+            children: [
+              for (final type in PointType.values)
+                _DistanceRow(
+                  type: type,
+                  values: s.distancesFor(type),
+                  onChanged: (v) => set(switch (type) {
+                    PointType.camera => s.copyWith(cameraDistances: v),
+                    PointType.bump => s.copyWith(bumpDistances: v),
+                    PointType.mobile => s.copyWith(mobileDistances: v),
+                  }),
+                ),
+            ],
+          ),
+          _Group(
+            title: 'Speed limit',
+            children: [
+              _ToleranceRow(
+                value: s.overSpeedTolerance,
+                onChanged: (v) => set(s.copyWith(overSpeedTolerance: v)),
+              ),
+            ],
+          ),
+        ];
+      case SettingsSection.sounds:
+        return [
+          _Group(
+            children: [
+              _SwitchRow(
+                icon: s.muted
+                    ? Icons.volume_off_rounded
+                    : Icons.record_voice_over_rounded,
+                color: const Color(0xFFFF2D55),
+                title: 'Voice warnings',
+                subtitle: s.muted
+                    ? 'Off: only the warning card shows'
+                    : 'Sounds and voice play for each warning',
+                value: !s.muted,
+                onChanged: (v) => set(s.copyWith(muted: !v)),
+              ),
+            ],
+          ),
+          _SoundsSection(app: app),
+        ];
+      case SettingsSection.map:
+        return [
+          _Group(
+            title: 'Map style',
+            footer: 'Automatic: light by day, dark at night.',
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(Space.lg),
+                child: Row(
+                  children: [
+                    for (final look in MapLook.values) ...[
+                      if (look != MapLook.values.first)
+                        const SizedBox(width: Space.sm),
+                      Expanded(
+                        child: _LookTile(
+                          look: look,
+                          selected: s.mapLook == look,
+                          onTap: () => set(s.copyWith(mapLook: look)),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+          _Group(
+            title: 'Screen',
+            children: [
+              _SwitchRow(
+                icon: Icons.light_mode_rounded,
+                color: p.warning,
+                title: 'Keep screen on',
+                subtitle: 'While the app is open',
+                value: s.keepScreenOn,
+                onChanged: (v) => set(s.copyWith(keepScreenOn: v)),
+              ),
+            ],
+          ),
+        ];
+      case SettingsSection.radar:
+        return [_RadarSection(app: app)];
+      case SettingsSection.points:
+        return [_PointsSection(app: app)];
+      case SettingsSection.account:
+        return [_AccountSection(app: app)];
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return Scaffold(
+      backgroundColor: p.bg,
+      body: ListenableBuilder(
+        listenable: app,
+        builder: (context, _) => LayoutBuilder(
+          builder: (context, box) => CustomScrollView(
+            slivers: [
+              SliverAppBar.large(
+                title: Text(section.title),
+                automaticallyImplyLeading: !embedded,
+                backgroundColor: p.bg,
+                surfaceTintColor: Colors.transparent,
+              ),
+              SliverPadding(
+                padding: _readable(box.maxWidth, bottom: Space.xxl * 2),
+                sliver: SliverList.list(children: _content(context)),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Version and the credits the data and car picture licenses ask for.
+class _About extends StatelessWidget {
+  const _About();
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final small = TextStyle(color: p.textTertiary, fontSize: 12, height: 1.5);
+    return Column(
+      children: [
+        Text(
+          'Speed Alert 1.0',
+          style: TextStyle(
+            color: p.textSecondary,
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: Space.xs),
+        // Required by the OpenStreetMap license (ODbL) for the imported
+        // cameras and bumps, and by CC BY 4.0 for the 3D model the car
+        // picture is made from (see assets/images/CREDITS.md).
+        Text(
+          'Camera and bump data © OpenStreetMap contributors\n'
+          'Car: "2024 BYD Seal" 3D model by 007 (Sketchfab), CC BY 4.0',
+          textAlign: TextAlign.center,
+          style: small,
+        ),
+      ],
     );
   }
 }
@@ -174,8 +718,8 @@ class SettingsScreen extends StatelessWidget {
 
 /// A titled group of rows in one card (like an iOS inset-grouped list).
 class _Group extends StatelessWidget {
-  const _Group({required this.title, required this.children, this.footer});
-  final String title;
+  const _Group({required this.children, this.title, this.footer});
+  final String? title;
   final List<Widget> children;
   final String? footer;
 
@@ -187,17 +731,18 @@ class _Group extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.only(left: Space.lg, bottom: Space.sm),
-            child: Text(
-              title,
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: p.textSecondary,
+          if (title != null)
+            Padding(
+              padding: const EdgeInsets.only(left: Space.lg, bottom: Space.sm),
+              child: Text(
+                title!,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: p.textSecondary,
+                ),
               ),
             ),
-          ),
           AppCard(
             radius: Radii.lg,
             child: Column(
@@ -639,7 +1184,7 @@ class _SoundsSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = app.settings;
     return _Group(
-      title: 'Warning sounds',
+      title: 'Sound for each warning',
       footer:
           'Tap a warning to choose a built-in sound, any sound file, or a '
           'video (only its sound plays). Sounds stop after '
@@ -674,7 +1219,6 @@ class _RadarSection extends StatelessWidget {
     final p = context.palette;
     final s = app.settings;
     return _Group(
-      title: 'Police radar',
       footer:
           'When you suddenly slow down on a fast road without stopping (like '
           'drivers do for a police radar), only that spot is sent, never your '
@@ -965,7 +1509,6 @@ class _PointsSection extends StatelessWidget {
     final chevron = Icon(Icons.chevron_right_rounded, color: p.textTertiary);
 
     return _Group(
-      title: 'Your points',
       children: [
         Padding(
           padding: const EdgeInsets.all(Space.lg),
@@ -1189,7 +1732,6 @@ class _AccountSection extends StatelessWidget {
     final pending = sync.pending;
 
     return _Group(
-      title: 'Account & sync',
       footer: registered
           ? 'Your points and settings are backed up to this account. '
                 'Sound files stay on this phone.'

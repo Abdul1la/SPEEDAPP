@@ -12,8 +12,11 @@ import {
   describeStep,
   googleKind,
   googleProvider,
+  citiesFirst,
   homeFirst,
+  normalizeQuery,
   osmProvider,
+  placeKindOf,
   stepsFromOsrm,
 } from '../src/services/geo.ts';
 import type { GeoProvider, LatLng, Place, RawRoute } from '../src/services/geo.ts';
@@ -305,7 +308,7 @@ test('Iraq first, then the rest of the world; no place twice', () => {
   assert.equal(homeFirst([[at('a', 'A'), at('b', 'B'), at('c', 'C')]], () => false, 2).length, 2);
 });
 
-test('OpenStreetMap search: inside Iraq and anywhere, Iraq first', async () => {
+test('OpenStreetMap search: near the driver, then the rest of Iraq; Iraq only', async () => {
   const feature = (id: number, name: string | undefined, cc: string, extra: Record<string, string> = {}) => ({
     geometry: { coordinates: [43.0, 36.85] },
     properties: { osm_type: 'N', osm_id: id, name, countrycode: cc, osm_value: 'residential', city: 'Duhok', ...extra },
@@ -316,8 +319,13 @@ test('OpenStreetMap search: inside Iraq and anywhere, Iraq first', async () => {
     urls.push(url);
     const bbox = url.searchParams.get('bbox');
     const features =
-      bbox === '38.79,29.06,48.64,37.39' // Iraq
-        ? [feature(3, 'Lelav Mall', 'IQ', { city: 'Mosul' }), feature(2, 'Lelav Street', 'IQ'), feature(9, undefined, 'IQ', { osm_value: 'school' })]
+      bbox === '38.79,29.06,48.64,37.39' // Iraq (the box also covers bits of Syria)
+        ? [
+            feature(3, 'Lelav Mall', 'IQ', { city: 'Mosul' }),
+            feature(2, 'Lelav Street', 'IQ'),
+            feature(9, undefined, 'IQ', { osm_value: 'school' }),
+            feature(7, 'Lelav Hotel', 'SY', { city: 'Qamishli' }),
+          ]
         : bbox // around the driver
           ? [feature(2, 'Lelav Street', 'IQ'), feature(4, 'Lelav Market', 'IQ', { city: 'Duhok' })]
           : [feature(1, 'Lelavale', 'US', { city: 'Hardin' }), feature(3, 'Lelav Mall', 'IQ', { city: 'Mosul' })];
@@ -329,24 +337,28 @@ test('OpenStreetMap search: inside Iraq and anywhere, Iraq first', async () => {
     const port = (server.address() as AddressInfo).port;
     const geo = osmProvider({ photonUrl: `http://127.0.0.1:${port}`, osrmUrl: 'http://127.0.0.1:9' });
     const places = await geo.search('lelav', DUHOK, 'en');
-    // Near Duhok first, then the rest of Iraq, then the world.
+    // Near Duhok first, then the rest of Iraq; nothing from other countries.
     assert.deepEqual(
       places.map((p) => p.name),
-      ['Lelav Street', 'Lelav Market', 'Lelav Mall', 'Lelavale'],
+      ['Lelav Street', 'Lelav Market', 'Lelav Mall'],
     );
     assert.equal(places[0]!.id, 'N2');
     assert.equal('country' in places[0]!, false);
-    assert.equal(urls.length, 3);
+    assert.equal('osmKey' in places[0]!, false);
+    assert.equal(urls.length, 2);
     assert.deepEqual(urls.map((u) => u.searchParams.get('bbox')).sort(), [
       '38.79,29.06,48.64,37.39',
       '42.7135,36.6469,43.2635,37.0869',
-      null,
     ].sort());
-    assert.ok(urls.every((u) => u.searchParams.get('lat') === DUHOK.lat.toFixed(5)));
-    // Without the driver's position: no local box.
+    // Near Duhok: with the position; all Iraq: without (cities by importance).
+    for (const u of urls) {
+      const local = u.searchParams.get('bbox') !== '38.79,29.06,48.64,37.39';
+      assert.equal(u.searchParams.get('lat'), local ? DUHOK.lat.toFixed(5) : null);
+    }
+    // Without the driver's position: only the Iraq box.
     urls.length = 0;
     await geo.search('lelav street', null, 'en');
-    assert.equal(urls.length, 2);
+    assert.equal(urls.length, 1);
     assert.equal(await geo.place('N2', 'en'), null);
   } finally {
     server.close();
@@ -375,7 +387,7 @@ const prediction = (id: string, main: string, secondary: string, types: string[]
   },
 });
 
-test('Google search: Iraq first, then the world; spot looked up when picked', async () => {
+test('Google search: Iraq only; spot looked up when picked', async () => {
   const { fetchImpl, requests } = fakeGoogle((url, body) => {
     if (url.includes(':autocomplete')) {
       return {
@@ -403,23 +415,21 @@ test('Google search: Iraq first, then the world; spot looked up when picked', as
     [
       ['g:LELAV_123', 'Lelav City', 'Nzarke, Duhok, Iraq', 'neighbourhood', null, 4200],
       ['g:MALL_1', 'Mazi Mall', 'Duhok, Iraq', 'mall', null, null],
-      ['g:HOTEL_9', 'Lelav Hotel', 'Van, Türkiye', 'hotel', null, null],
     ],
   );
-  const [home, world] = requests.map((r) => r.body);
+  // One search, Iraq only (no worldwide search: no Lelav Hotel in Türkiye).
+  assert.equal(requests.length, 1);
+  const home = requests[0]!.body;
   assert.deepEqual(home.includedRegionCodes, ['iq']);
-  assert.equal(world.includedRegionCodes, undefined);
-  for (const b of [home, world]) {
-    assert.equal(b.input, 'lelav city');
-    assert.equal(b.sessionToken, 'session_ABC123');
-    assert.equal(b.languageCode, 'en');
-    assert.deepEqual(b.locationBias.circle.center, { latitude: DUHOK.lat, longitude: DUHOK.lng });
-  }
+  assert.equal(home.input, 'lelav city');
+  assert.equal(home.sessionToken, 'session_ABC123');
+  assert.equal(home.languageCode, 'en');
+  assert.deepEqual(home.locationBias.circle.center, { latitude: DUHOK.lat, longitude: DUHOK.lng });
   assert.equal(requests[0]!.headers['x-goog-api-key'], 'test-key');
 
   const spot = await geo.place('g:LELAV_123', 'en', 'session_ABC123');
   assert.deepEqual(spot, { id: 'g:LELAV_123', name: '', address: 'Nzarke, Duhok', lat: 36.84, lng: 43.01, kind: 'neighbourhood' });
-  const details = requests[2]!;
+  const details = requests[1]!;
   assert.match(details.url, /\/v1\/places\/LELAV_123\?languageCode=en&sessionToken=session_ABC123$/);
   assert.equal(details.headers['x-goog-fieldmask'], 'id,location,formattedAddress,types');
   // OpenStreetMap ids go to OpenStreetMap.
@@ -460,4 +470,181 @@ test('live Google Places (set GOOGLE_PLACES_KEY)', { skip: !process.env.GOOGLE_P
   assert.ok(places[0]?.id.startsWith('g:'), JSON.stringify(places.slice(0, 3)));
   const spot = await geo.place(places[0]!.id, 'en');
   assert.ok(spot && Math.abs(spot.lat! - DUHOK.lat) < 1, JSON.stringify(spot));
+});
+
+test('kinds of places in English, Arabic and Kurdish', () => {
+  for (const q of ['cafe', 'Cafe', 'coffee shop', 'cafe near me', 'كافيه', 'مقهى', 'کافێ']) {
+    assert.deepEqual(placeKindOf(q), ['amenity:cafe'], q);
+  }
+  for (const q of ['restaurant', 'مطعم', 'مطاعم قريبة', 'چێشتخانە']) {
+    assert.deepEqual(placeKindOf(q), ['amenity:restaurant', 'amenity:fast_food'], q);
+  }
+  assert.deepEqual(placeKindOf('مستشفى'), ['amenity:hospital', 'amenity:clinic']);
+  assert.deepEqual(placeKindOf('نەخۆشخانە'), ['amenity:hospital', 'amenity:clinic']);
+  assert.deepEqual(placeKindOf('بەنزینخانە'), ['amenity:fuel']);
+  assert.deepEqual(placeKindOf('gas station'), ['amenity:fuel']);
+  // Names are searched as names.
+  for (const q of ['Duhok Mall', 'Lords Cafe', 'Erbil', 'مطعم شورش', 'Kawa Road']) assert.equal(placeKindOf(q), null, q);
+  // One spelling for letters written several ways.
+  assert.equal(normalizeQuery('مستشفى'), normalizeQuery('مستشفي'));
+  assert.equal(normalizeQuery('أربيل'), normalizeQuery('اربيل'));
+  assert.equal(normalizeQuery('کافێ'), normalizeQuery('كافي'));
+});
+
+/** A fake Photon: /reverse answers [reverse], /api/ answers [api]; records each request. */
+async function fakePhoton(
+  reverse: (url: URL) => unknown[],
+  api: (url: URL) => unknown[] = () => [],
+): Promise<{ urls: URL[]; geo: GeoProvider; close: () => void }> {
+  const urls: URL[] = [];
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://x');
+    urls.push(url);
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ features: url.pathname === '/reverse' ? reverse(url) : api(url) }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  const geo = osmProvider({ photonUrl: `http://127.0.0.1:${port}`, osrmUrl: 'http://127.0.0.1:9' });
+  return { urls, geo, close: () => server.close() };
+}
+
+const spot = (id: number, name: string | undefined, metersNorth: number, extra: Record<string, string> = {}) => ({
+  geometry: { coordinates: [DUHOK.lng, DUHOK.lat + metersNorth / 111_320] },
+  properties: { osm_type: 'N', osm_id: id, name, countrycode: 'IQ', osm_key: 'amenity', osm_value: 'cafe', city: 'Duhok', ...extra },
+});
+
+test('a kind of place: the nearest ones of that kind, in Iraq, nearest first', async () => {
+  const { urls, geo, close } = await fakePhoton((url) =>
+    url.searchParams.get('radius') === '10'
+      ? [
+          spot(1, 'Zada Cafe', 900),
+          spot(2, 'Lacasetta Coffee', 300),
+          spot(3, undefined, 100), // no name
+          spot(4, 'Border Cafe', 200, { countrycode: 'TR' }),
+          spot(5, 'Cafe Au Lait', 1500),
+          spot(6, 'Darwish Coffee House', 2500),
+          spot(7, 'Lords Cafe', 4000),
+        ]
+      : [],
+  );
+  try {
+    const places = await geo.search('كافيه', DUHOK, 'en');
+    assert.deepEqual(
+      places.map((p) => p.name),
+      ['Lacasetta Coffee', 'Zada Cafe', 'Cafe Au Lait', 'Darwish Coffee House', 'Lords Cafe'],
+    );
+    // Straight-line meters from the driver (within 1%).
+    [300, 900, 1500, 2500, 4000].forEach((m, i) => assert.ok(Math.abs(places[i]!.distanceM! - m) <= m * 0.01));
+    assert.equal(urls.length, 1);
+    assert.equal(urls[0]!.pathname, '/reverse');
+    assert.deepEqual(urls[0]!.searchParams.getAll('osm_tag'), ['amenity:cafe']);
+    assert.equal(urls[0]!.searchParams.get('lat'), DUHOK.lat.toFixed(5));
+  } finally {
+    close();
+  }
+});
+
+test('few of that kind nearby: look further (50 km)', async () => {
+  const { urls, geo, close } = await fakePhoton((url) =>
+    url.searchParams.get('radius') === '10'
+      ? [spot(1, 'Duhok Hospital', 2000, { osm_value: 'hospital' })]
+      : [spot(1, 'Duhok Hospital', 2000, { osm_value: 'hospital' }), spot(2, 'Zakho Hospital', 40_000, { osm_value: 'hospital' })],
+  );
+  try {
+    const places = await geo.search('hospital', DUHOK, 'en');
+    assert.deepEqual(places.map((p) => p.name), ['Duhok Hospital', 'Zakho Hospital']);
+    assert.deepEqual(urls.map((u) => u.searchParams.get('radius')), ['10', '50']);
+  } finally {
+    close();
+  }
+});
+
+test('a kind of place without the driver\'s position: a normal search', async () => {
+  const { urls, geo, close } = await fakePhoton(() => [], () => [spot(1, 'Cafe', 0)]);
+  try {
+    assert.deepEqual((await geo.search('cafe', null, 'en')).map((p) => p.name), ['Cafe']);
+    assert.equal(urls[0]!.pathname, '/api/');
+  } finally {
+    close();
+  }
+});
+
+test('plain buildings are skipped, and a road cut in pieces shows once', async () => {
+  const { geo, close } = await fakePhoton(
+    () => [],
+    () => [
+      spot(1, 'Barzani', 0, { osm_key: 'building', osm_value: 'yes' }),
+      spot(2, 'Barzani', 50, { osm_key: 'building', osm_value: 'yes' }),
+      spot(3, 'Barzani Park', 100, { osm_key: 'leisure', osm_value: 'park' }),
+      spot(4, 'Kawa Road', 200, { osm_key: 'highway', osm_value: 'trunk' }),
+      spot(5, 'Kawa Road', 900, { osm_key: 'highway', osm_value: 'primary' }),
+      spot(6, 'Kawa Road', 300, { osm_key: 'highway', osm_value: 'trunk', city: 'Zakho' }),
+    ],
+  );
+  try {
+    const places = await geo.search('barzani kawa', null, 'en');
+    assert.deepEqual(
+      places.map((p) => [p.name, p.address]),
+      [
+        ['Barzani Park', 'Duhok'],
+        ['Kawa Road', 'Duhok'],
+        ['Kawa Road', 'Zakho'],
+      ],
+    );
+  } finally {
+    close();
+  }
+});
+
+test('cities and provinces first: "Erbil" is the city, not the road to it', () => {
+  const place = (name: string, kind: string): Place => ({ id: name + kind, name, address: '', lat: 0, lng: 0, kind });
+  const found = [
+    place('Duhok - Erbil Road', 'trunk'),
+    place('Erbil Bakery', 'bakery'),
+    place('Erbil District', 'district'),
+    place('Erbil', 'state'),
+    place('Erbil', 'city'),
+    place('Hotel Erbil', 'hotel'),
+  ];
+  assert.deepEqual(
+    citiesFirst(found, 'erbil').map((p) => `${p.name} [${p.kind}]`),
+    ['Erbil [city]', 'Erbil [state]', 'Erbil District [district]', 'Duhok - Erbil Road [trunk]', 'Erbil Bakery [bakery]', 'Hotel Erbil [hotel]'],
+  );
+  // Arabic spelling variants match too.
+  assert.equal(citiesFirst([place('x', 'cafe'), place('أربيل', 'city')], 'اربيل')[0]!.name, 'أربيل');
+});
+
+test('Arabic and Kurdish searches: answered in that language, as typed and simplified', async () => {
+  const { urls, geo, close } = await fakePhoton(
+    () => [],
+    (url) =>
+      url.searchParams.get('bbox') === '38.79,29.06,48.64,37.39'
+        ? [spot(1, 'شارع اربيل', 0, { osm_key: 'highway', osm_value: 'residential' }), spot(2, 'أربيل', 0, { osm_key: 'place', osm_value: 'city', city: 'أربيل' })]
+        : [],
+  );
+  try {
+    const places = await geo.search('أربيل', DUHOK, 'en');
+    // The city first ("cities first" reads the Arabic name).
+    assert.deepEqual(places.map((p) => p.name), ['أربيل', 'شارع اربيل']);
+    // As typed (أربيل) and simplified (اربيل), near Duhok and in all Iraq: in Arabic.
+    assert.deepEqual(urls.map((u) => u.searchParams.get('q')).sort(), ['أربيل', 'أربيل', 'اربيل', 'اربيل']);
+    assert.ok(urls.every((u) => u.searchParams.get('lang') === 'ar'));
+
+    urls.length = 0;
+    await geo.search('هەولێر', null, 'en');
+    assert.ok(urls.every((u) => u.searchParams.get('lang') === 'ckb'));
+    // Latin letters: as asked.
+    urls.length = 0;
+    await geo.search('Erbil', null, 'en');
+    assert.deepEqual(urls.map((u) => [u.searchParams.get('q'), u.searchParams.get('lang')]), [['Erbil', 'en']]);
+  } finally {
+    close();
+  }
+});
+
+test('"cities first" ignores the Arabic "ال"', () => {
+  const place = (name: string, kind: string): Place => ({ id: name + kind, name, address: '', lat: 0, lng: 0, kind });
+  const found = [place('البصرة', 'motel'), place('بصرة', 'city')];
+  assert.deepEqual(citiesFirst(found, 'البصرة').map((p) => p.kind), ['city', 'motel']);
 });
