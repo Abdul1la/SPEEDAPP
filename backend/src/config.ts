@@ -12,6 +12,10 @@ export interface Config {
   migrateOnStart: boolean;
   /** Limit requests per phone / IP (turn off only for tests). */
   rateLimit: boolean;
+  /** Place search service (Photon, OpenStreetMap). */
+  photonUrl: string;
+  /** Driving routes service (OSRM, OpenStreetMap). */
+  osrmUrl: string;
 }
 
 function int(value: string | undefined, fallback: number): number {
@@ -49,5 +53,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxPointsPerDay: int(env.MAX_POINTS_PER_DAY, 100),
     migrateOnStart: bool(env.MIGRATE_ON_START, true),
     rateLimit: bool(env.RATE_LIMIT, true),
+    photonUrl: env.PHOTON_URL || 'https://photon.komoot.io',
+    osrmUrl: env.OSRM_URL || 'https://router.project-osrm.org',
   };
 }

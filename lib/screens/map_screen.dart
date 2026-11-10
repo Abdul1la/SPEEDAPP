@@ -485,7 +485,8 @@ class _MapScreenState extends State<MapScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             SpeedGauge(
-              kmh: pos?.speedKmh ?? 0,
+              // Live speed only (an old saved position has an old speed).
+              kmh: (app.isSimulating ? pos : app.livePosition)?.speedKmh ?? 0,
               limit: active?.point.speedLimit,
               overLimit: active?.overLimit ?? false,
               size: _gaugeSize,
