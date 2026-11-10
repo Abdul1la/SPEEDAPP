@@ -1,14 +1,16 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../models/speed_point.dart';
 import '../theme/app_theme.dart';
 import '../widgets/ui.dart';
 
-/// Draws our own map pins (camera / speed bump / the driver's car) in code, so there
-/// are no image files to manage. Edit the paint code to change the look.
+/// Our own map pins (camera / speed bump / police radar), drawn in code: edit
+/// the paint code to change their look. The driver's car is a picture
+/// ([carAsset]).
 ///
 /// Flat design: colored circle with a white ring, a short pointer to the
 /// exact spot, and a small speed-limit sign when the point has a limit.
@@ -46,12 +48,7 @@ class MarkerIcons {
   Future<bool> prepare(Iterable<SpeedPoint> points, double dpr) async {
     var changed = false;
     if (!_cache.containsKey('car')) {
-      _cache['car'] = await _render(
-        carSize.width,
-        carSize.height,
-        dpr,
-        _paintCar,
-      );
+      _cache['car'] = await _loadCar();
       changed = true;
     }
     for (final p in points) {
@@ -158,207 +155,20 @@ class MarkerIcons {
     }
   }
 
-  /// Size of the car icon (pointing up = driving direction).
+  /// Size of the car icon on the map (pointing up = driving direction).
   static const carSize = Size(46, 84);
 
-  /// The driver's car: a modern electric car seen from above, shaded so it
-  /// looks 3D (lies flat on the map, so it tilts with the map while driving).
-  static void _paintCar(Canvas c, Size s) {
-    final cx = s.width / 2;
-    const bodyW = 30.0;
-    const bodyH = 66.0;
-    final top = (s.height - bodyH) / 2;
-    final left = cx - bodyW / 2;
-    final right = cx + bodyW / 2;
-    final bottom = top + bodyH;
+  /// The driver's car: a photo-real electric car seen from above, made by
+  /// `tool/render_car.py` at 4x [carSize]. It lies flat on the map, so it
+  /// turns and tilts with the map while driving.
+  static const carAsset = 'assets/images/car.png';
+  static const _carScale = 4.0;
 
-    // Soft shadow under the car.
-    c.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(left - 2, top + 4, bodyW + 4, bodyH),
-        const Radius.circular(14),
-      ),
-      Paint()
-        ..color = const Color(0x66000000)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5),
-    );
-
-    // Wheels, just showing at the sides.
-    final tyre = Paint()..color = const Color(0xFF111827);
-    for (final y in [top + 13, bottom - 21]) {
-      for (final x in [left - 2.2, right - 2.8]) {
-        c.drawRRect(
-          RRect.fromRectAndRadius(
-            Rect.fromLTWH(x, y, 5, 11),
-            const Radius.circular(2),
-          ),
-          tyre,
-        );
-      }
-    }
-
-    // Body: rounded nose and tail, slightly narrower at the front.
-    final body = Path()
-      ..moveTo(cx, top)
-      ..cubicTo(right - 2, top, right, top + 6, right, top + 16)
-      ..lineTo(right, bottom - 12)
-      ..cubicTo(right, bottom - 3, right - 4, bottom, cx, bottom)
-      ..cubicTo(left + 4, bottom, left, bottom - 3, left, bottom - 12)
-      ..lineTo(left, top + 16)
-      ..cubicTo(left, top + 6, left + 2, top, cx, top)
-      ..close();
-    final bodyRect = Rect.fromLTRB(left, top, right, bottom);
-    // Pearl white: lighter in the middle, darker at the curved sides.
-    c.drawPath(
-      body,
-      Paint()
-        ..shader = const LinearGradient(
-          colors: [
-            Color(0xFFB8C2CF),
-            Color(0xFFF8FAFC),
-            Color(0xFFFFFFFF),
-            Color(0xFFF1F4F8),
-            Color(0xFFAEB8C6),
-          ],
-          stops: [0, 0.22, 0.5, 0.78, 1],
-        ).createShader(bodyRect),
-    );
-    // Light from the front, shade toward the back.
-    c.drawPath(
-      body,
-      Paint()
-        ..shader = const LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0x00FFFFFF), Color(0x00000000), Color(0x22000000)],
-          stops: [0, 0.6, 1],
-        ).createShader(bodyRect),
-    );
-    c.drawPath(
-      body,
-      Paint()
-        ..color = const Color(0x8C1F2937)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.2,
-    );
-
-    // Side mirrors.
-    final mirror = Paint()..color = const Color(0xFF1F2937);
-    c.drawOval(
-      Rect.fromCenter(
-        center: Offset(left - 1.5, top + 24),
-        width: 5,
-        height: 3.4,
-      ),
-      mirror,
-    );
-    c.drawOval(
-      Rect.fromCenter(
-        center: Offset(right + 1.5, top + 24),
-        width: 5,
-        height: 3.4,
-      ),
-      mirror,
-    );
-
-    // Glass: windshield, panoramic roof, rear window (dark, with a sky reflection).
-    const glass = LinearGradient(
-      begin: Alignment.topLeft,
-      end: Alignment.bottomRight,
-      colors: [Color(0xFF3B4A63), Color(0xFF111827), Color(0xFF0B1220)],
-    );
-    final cabin = Path()
-      ..moveTo(left + 4.5, top + 23)
-      ..cubicTo(left + 7, top + 17, right - 7, top + 17, right - 4.5, top + 23)
-      ..lineTo(right - 3.5, bottom - 20)
-      ..cubicTo(
-        right - 6,
-        bottom - 15,
-        left + 6,
-        bottom - 15,
-        left + 3.5,
-        bottom - 20,
-      )
-      ..close();
-    c.drawPath(cabin, Paint()..shader = glass.createShader(cabin.getBounds()));
-    // Glass edge catching the light.
-    c.drawPath(
-      cabin,
-      Paint()
-        ..color = const Color(0x40FFFFFF)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 0.8,
-    );
-    // Thin curved roof pillars: windshield / panoramic roof / rear window.
-    final pillar = Paint()
-      ..color = const Color(0xCCCBD5E1)
-      ..strokeWidth = 1.1
-      ..style = PaintingStyle.stroke;
-    c.drawPath(
-      Path()
-        ..moveTo(left + 4.6, top + 32)
-        ..quadraticBezierTo(cx, top + 29.5, right - 4.6, top + 32),
-      pillar,
-    );
-    c.drawPath(
-      Path()
-        ..moveTo(left + 4, bottom - 25)
-        ..quadraticBezierTo(cx, bottom - 23, right - 4, bottom - 25),
-      pillar,
-    );
-    // Reflection streaks on the windshield and roof.
-    final shine = Paint()
-      ..color = const Color(0x4DFFFFFF)
-      ..strokeWidth = 1.6
-      ..strokeCap = StrokeCap.round;
-    c.drawLine(
-      Offset(left + 9, top + 22.5),
-      Offset(left + 12.5, top + 28.5),
-      shine,
-    );
-    c.drawLine(
-      Offset(right - 10, top + 36),
-      Offset(right - 7, top + 48),
-      shine..strokeWidth = 1.2,
-    );
-
-    // Hood lines and the edge of the front trunk.
-    final crease = Paint()
-      ..color = const Color(0x3D334155)
-      ..strokeWidth = 0.8
-      ..style = PaintingStyle.stroke;
-    c.drawLine(Offset(cx - 5, top + 6), Offset(cx - 6.5, top + 16), crease);
-    c.drawLine(Offset(cx + 5, top + 6), Offset(cx + 6.5, top + 16), crease);
-    c.drawPath(
-      Path()
-        ..moveTo(left + 3, top + 17.5)
-        ..quadraticBezierTo(cx, top + 15, right - 3, top + 17.5),
-      crease,
-    );
-    // Door seams along the sides.
-    for (final y in [top + 38.0, bottom - 30.0]) {
-      c.drawLine(Offset(left + 0.8, y), Offset(left + 3, y), crease);
-      c.drawLine(Offset(right - 3, y), Offset(right - 0.8, y), crease);
-    }
-
-    // LED headlights (thin light strips at the front corners).
-    final led = Paint()
-      ..color = const Color(0xFFE0F7FF)
-      ..strokeWidth = 2
-      ..strokeCap = StrokeCap.round
-      ..maskFilter = const MaskFilter.blur(BlurStyle.solid, 1.5);
-    c.drawLine(Offset(left + 3, top + 8), Offset(left + 9, top + 3.2), led);
-    c.drawLine(Offset(right - 3, top + 8), Offset(right - 9, top + 3.2), led);
-
-    // Full-width rear light bar.
-    c.drawLine(
-      Offset(left + 4, bottom - 3),
-      Offset(right - 4, bottom - 3),
-      Paint()
-        ..color = const Color(0xFFFF2D46)
-        ..strokeWidth = 2.2
-        ..strokeCap = StrokeCap.round
-        ..maskFilter = const MaskFilter.blur(BlurStyle.solid, 1.5),
+  static Future<BitmapDescriptor> _loadCar() async {
+    final data = await rootBundle.load(carAsset);
+    return BitmapDescriptor.bytes(
+      data.buffer.asUint8List(),
+      imagePixelRatio: _carScale,
     );
   }
 

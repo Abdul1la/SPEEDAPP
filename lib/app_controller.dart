@@ -139,15 +139,21 @@ class AppController extends ChangeNotifier implements SyncHost {
   SoundLibrary get sounds => voice.sounds;
 
   Future<void> init() async {
-    _points = await _storage.loadPoints();
-    _community = await _storage.loadCommunity();
+    // Everything saved loads at the same time (faster start).
+    final (points, community, settings) = await (
+      _storage.loadPoints(),
+      _storage.loadCommunity(),
+      _storage.loadSettings(),
+    ).wait;
+    _points = points;
+    _community = community;
     _mapPoints = null;
     await _dropExpired();
     _expiryTimer = Timer.periodic(
       const Duration(minutes: 1),
       (_) => unawaited(_dropExpired()),
     );
-    _settings = await _storage.loadSettings();
+    _settings = settings;
     voice.settings = _settings;
     await voice.init();
     // Remove sound files left over from sounds that were replaced.

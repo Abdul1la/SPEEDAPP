@@ -39,8 +39,24 @@ services:
       MAX_POINTS_PER_DAY: ${MAX_POINTS_PER_DAY:-100}
       GOOGLE_PLACES_KEY: ${GOOGLE_PLACES_KEY:-}
       SEARCH_COUNTRY: ${SEARCH_COUNTRY:-iq}
+      # Our own place search (Iraq only), below.
+      PHOTON_URL: ${PHOTON_URL:-http://photon:2322}
     ports:
       - "3000:3000"
 
+  # Place search for Iraq (Photon, OpenStreetMap). The first start loads
+  # Iraq's places (about a minute); they stay in the photon-data volume.
+  # Refresh them: PHOTON_REFRESH=1 docker compose up -d photon
+  photon:
+    build: ./photon
+    restart: unless-stopped
+    environment:
+      PHOTON_REFRESH: ${PHOTON_REFRESH:-0}
+    volumes:
+      - photon-data:/photon/data
+    ports:
+      - "127.0.0.1:2322:2322"
+
 volumes:
   db-data:
+  photon-data:

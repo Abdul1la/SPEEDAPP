@@ -112,6 +112,45 @@ void main() {
     expect(out.last.speedKmh, closeTo(54, 2));
   });
 
+  test('highway speed is shown exactly as the GPS measures it', () {
+    final out = run(
+      SpeedFilter(),
+      seconds: 10,
+      metersPerSecond: 120 / 3.6,
+      reported: 120 / 3.6,
+      speedAccuracy: 0.5,
+    );
+    expect(out.last.speedKmh, closeTo(120, 0.01));
+  });
+
+  test('weak signal while driving slowly: the movement is the speed', () {
+    // Between tall buildings the phone says its 25 km/h reading may be off
+    // by 14 km/h, but the car clearly moved 40+ m in a few seconds.
+    final out = run(
+      SpeedFilter(),
+      seconds: 10,
+      metersPerSecond: 25 / 3.6,
+      reported: 25 / 3.6,
+      speedAccuracy: 4,
+      accuracy: 10,
+    );
+    expect(out.last.speedKmh, closeTo(25, 1));
+    expect(out.last.stationary, isFalse);
+  });
+
+  test('weak signal while parked stays 0', () {
+    final out = run(
+      SpeedFilter(),
+      seconds: 10,
+      metersPerSecond: 0,
+      reported: 3,
+      speedAccuracy: 4,
+      accuracy: 10,
+      wobble: 4,
+    );
+    expect(out.last.speedKmh, 0);
+  });
+
   test('stopping at a light goes to 0 within a few seconds', () {
     final f = SpeedFilter();
     run(f, seconds: 10, metersPerSecond: 12, reported: 12);

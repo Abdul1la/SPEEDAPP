@@ -2,7 +2,7 @@ import type { AuthUser } from '../auth/auth.ts';
 import { select } from '../db.ts';
 import type { Db } from '../db.ts';
 import { ApiError } from '../lib/errors.ts';
-import { GEOM, angleDifference } from '../lib/geo.ts';
+import { GEOM, angleDifference, distanceMeters } from '../lib/geo.ts';
 import { POINT_COLUMNS, toApiPoint } from './points.ts';
 import type { ApiPoint, PointRow } from './points.ts';
 
@@ -181,16 +181,18 @@ export function stepsFromOsrm(steps: OsrmStep[]): RouteStep[] {
 
 /** Search and routing (OpenStreetMap services by default; replaceable in tests). */
 export interface GeoProvider {
-  /** Near the driver first, then Iraq (the home country), then the rest of
-   * the world. [session]
-   * groups one search's requests (Google bills a search as one). */
+  /** Places in Iraq only (the home country), near the driver first. A kind
+   * of place ("cafe", "مطعم"...) lists the nearest ones of that kind.
+   * [session] groups one search's requests (Google bills a search as one). */
   search(query: string, near: LatLng | null, lang: string, session?: string): Promise<Place[]>;
   /** The spot of a search result that came without one (Google); null if unknown. */
   place(id: string, lang: string, session?: string): Promise<Place | null>;
   routes(from: LatLng, to: LatLng): Promise<RawRoute[]>;
 }
 
-/** Search shows places in this country first. Box: [west, south, east, north]. */
+/** Search shows places in this country only. Box: [west, south, east,
+ * north] (it also covers bits of the neighbours, so results are checked by
+ * country too). */
 export const HOME_COUNTRY = { code: 'iq', bbox: [38.79, 29.06, 48.64, 37.39] } as const;
 
 /** The most results one search returns. */
@@ -278,13 +280,20 @@ interface PhotonFeature {
  * routes with alternatives). Free, no key; fair use only. For many users,
  * point PHOTON_URL / OSRM_URL at your own servers.
  */
-/** Photon results as places (unnamed things without an address are skipped). */
-function photonPlaces(features: PhotonFeature[]): (Place & { country: string })[] {
-  const places: (Place & { country: string })[] = [];
+/** A Photon result, with what search needs before it is sent to the app. */
+type PhotonPlace = Place & { country: string; osmKey: string; city: string };
+
+/**
+ * Photon results as places. Skipped: unnamed things without an address, and
+ * plain buildings ("building=yes": a house named "Barzani" five times).
+ */
+function photonPlaces(features: PhotonFeature[]): PhotonPlace[] {
+  const places: PhotonPlace[] = [];
   for (const f of features) {
     const c = f.geometry?.coordinates;
     const p = f.properties ?? {};
     if (!c || typeof c[0] !== 'number' || typeof c[1] !== 'number') continue;
+    if (p.osm_key === 'building' && (p.osm_value === 'yes' || p.osm_value == null)) continue;
     const street = [p.street, p.housenumber].filter(Boolean).join(' ');
     const name = String(p.name ?? street).trim();
     if (!name) continue;
@@ -299,9 +308,128 @@ function photonPlaces(features: PhotonFeature[]): (Place & { country: string })[
       lng: c[0],
       kind: String(p.osm_value ?? p.type ?? 'place'),
       country: String(p.countrycode ?? '').toLowerCase(),
+      osmKey: String(p.osm_key ?? ''),
+      city: String(p.city ?? p.county ?? '').toLowerCase(),
     });
   }
   return places;
+}
+
+/** Only places in Iraq; a road cut into many pieces in OpenStreetMap once. */
+function iraqOnly(places: PhotonPlace[]): PhotonPlace[] {
+  const roads = new Set<string>();
+  return places.filter((p) => {
+    if (p.country !== HOME_COUNTRY.code) return false;
+    if (p.osmKey !== 'highway') return true;
+    const key = `${p.name.toLowerCase()}|${p.city}`;
+    if (roads.has(key)) return false;
+    roads.add(key);
+    return true;
+  });
+}
+
+const toPlace = ({ country: _c, osmKey: _k, city: _city, ...p }: PhotonPlace): Place => p;
+
+/** Cities and towns, then provinces, then districts, villages and quarters. */
+const CITIES = new Set(['city', 'town']);
+const PROVINCES = new Set(['state', 'province', 'region']);
+const SMALL_PLACES = new Set(['district', 'county', 'municipality', 'village', 'suburb', 'quarter', 'neighbourhood', 'hamlet']);
+
+/**
+ * Searching "Erbil" shows the city of Erbil first, not "Duhok - Erbil Road"
+ * near the driver: places whose name starts like the search, cities and
+ * provinces first, then smaller places, then everything else (in order).
+ */
+export function citiesFirst<T extends Place>(places: T[], query: string): T[] {
+  // Without the Arabic "ال" or "Al-" ("البصرة" is "بصرة" on the map, "Najaf"
+  // is "Al-Najaf").
+  const bare = (s: string) => normalizeQuery(s).replace(/(^| )(ال|al )/g, '$1');
+  const q = bare(query);
+  const rank = (p: T) => {
+    if (!q || !bare(p.name).startsWith(q)) return 3;
+    if (CITIES.has(p.kind)) return 0;
+    if (PROVINCES.has(p.kind)) return 1;
+    if (SMALL_PLACES.has(p.kind)) return 2;
+    return 3;
+  };
+  return places.map((p, i) => ({ p, i, r: rank(p) })).sort((a, b) => a.r - b.r || a.i - b.i).map((x) => x.p);
+}
+
+// ---- Search by kind: "cafe", "مطعم", "نەخۆشخانە"... ------------------------
+
+/**
+ * Words for kinds of places, in English, Arabic and Kurdish (Sorani and
+ * Badini spellings), and the OpenStreetMap tags they mean. Searching one of
+ * them shows the nearest places of that kind, not places named "Cafe".
+ */
+export const PLACE_KINDS: { tags: string[]; words: string[] }[] = [
+  {
+    tags: ['amenity:cafe'],
+    words: ['cafe', 'cafes', 'café', 'coffee', 'coffee shop', 'كافيه', 'كافي', 'كوفي', 'مقهى', 'مقاهي', 'قهوة', 'كافتريا', 'کافێ', 'کافی', 'چایخانە', 'قاوەخانە'],
+  },
+  {
+    tags: ['amenity:restaurant', 'amenity:fast_food'],
+    words: ['restaurant', 'restaurants', 'food', 'fast food', 'مطعم', 'مطاعم', 'اكل', 'وجبات', 'چێشتخانە', 'خواردنگە', 'ڕێستۆرانت', 'مەتعەم'],
+  },
+  {
+    tags: ['amenity:hospital', 'amenity:clinic'],
+    words: ['hospital', 'hospitals', 'clinic', 'مستشفى', 'مستشفيات', 'عيادة', 'نەخۆشخانە', 'خەستەخانە'],
+  },
+  { tags: ['amenity:pharmacy'], words: ['pharmacy', 'chemist', 'صيدلية', 'صيدليات', 'دەرمانخانە'] },
+  {
+    tags: ['amenity:fuel'],
+    words: ['fuel', 'gas', 'gas station', 'petrol', 'petrol station', 'محطة وقود', 'محطة بنزين', 'بنزين', 'بانزينخانة', 'بەنزینخانە'],
+  },
+  {
+    tags: ['tourism:hotel', 'tourism:motel', 'tourism:guest_house'],
+    words: ['hotel', 'hotels', 'motel', 'فندق', 'فنادق', 'ئوتێل', 'هوتێل'],
+  },
+  { tags: ['shop:mall', 'shop:department_store'], words: ['mall', 'malls', 'shopping center', 'مول', 'مولات', 'مۆڵ', 'مۆل'] },
+  { tags: ['shop:supermarket'], words: ['supermarket', 'market', 'سوبرماركت', 'ماركت', 'سوپەرمارکێت', 'مارکێت'] },
+  { tags: ['shop:bakery'], words: ['bakery', 'مخبز', 'فرن', 'نانەواخانە'] },
+  { tags: ['amenity:bank', 'amenity:atm'], words: ['bank', 'atm', 'بنك', 'مصرف', 'بانک'] },
+  { tags: ['amenity:place_of_worship'], words: ['mosque', 'masjid', 'church', 'جامع', 'مسجد', 'كنيسة', 'مزگەفت', 'مزگەوت'] },
+  { tags: ['leisure:park'], words: ['park', 'parks', 'حديقة', 'منتزه', 'پارک', 'باخچە'] },
+  {
+    tags: ['amenity:school', 'amenity:university', 'amenity:college'],
+    words: ['school', 'university', 'college', 'مدرسة', 'جامعة', 'كلية', 'قوتابخانە', 'زانکۆ'],
+  },
+  { tags: ['amenity:police'], words: ['police', 'police station', 'شرطة', 'مركز شرطة', 'پۆلیس'] },
+];
+
+/** Lowercase, and one spelling for letters Arabic and Kurdish write
+ * several ways (أ/إ/آ, ة/ە/ھ/ه, ى/ي/ی, ك/ک), without diacritics. Our own
+ * search server (photon/prepare.jq) stores names simplified the same way:
+ * keep both in step. */
+export function normalizeQuery(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize('NFC')
+    .replace(/[ً-ْٰـ]/g, '') // harakat, tatweel
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/[ةەەھ]/g, 'ه')
+    .replace(/[ىيی]/g, 'ي')
+    .replace(/ک/g, 'ك')
+    .replace(/ۆ/g, 'و')
+    .replace(/[ێې]/g, 'ي')
+    .replace(/[ڵ]/g, 'ل')
+    .replace(/[ڕ]/g, 'ر')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
+/** "near me", "قريب"... don't change what is searched for. */
+const NEAR_WORDS = new Set(['near', 'me', 'nearby', 'nearest', 'around', 'قريب', 'قريبه', 'مني', 'اقرب', 'نزيك', 'نيزيك', 'نزيكترين']);
+
+const KIND_BY_WORD = new Map<string, string[]>();
+for (const k of PLACE_KINDS) for (const w of k.words) KIND_BY_WORD.set(normalizeQuery(w), k.tags);
+
+/** The OpenStreetMap tags when the whole search is a kind of place, else null. */
+export function placeKindOf(query: string): string[] | null {
+  const words = normalizeQuery(query)
+    .split(' ')
+    .filter((w) => w && !NEAR_WORDS.has(w));
+  return KIND_BY_WORD.get(words.join(' ')) ?? null;
 }
 
 /** A box about 25 km around [p]: [west, south, east, north]. (Much bigger
@@ -312,7 +440,19 @@ function localBox(p: LatLng): number[] {
   return [p.lng - dLng, p.lat - d, p.lng + dLng, p.lat + d].map((n) => Number(n.toFixed(4)));
 }
 
+const ARABIC_SCRIPT = /[\u0600-\u06FF]/;
+/** Letters Kurdish uses and Arabic doesn't. */
+const KURDISH_LETTERS = /[ێۆەڵڕڤپچژگکی]/;
+
 export function osmProvider(config: { photonUrl: string; osrmUrl: string }): GeoProvider {
+  /** Our own search server (photon/) has Arabic and Kurdish names; the
+   * public one answers only in English, German or French. */
+  const localNames = !/photon\.komoot\.io/i.test(config.photonUrl);
+  /** Results in the language of the search: Arabic, Kurdish, or [lang]. */
+  const langFor = (query: string, lang: string) => {
+    if (!localNames || !ARABIC_SCRIPT.test(query)) return lang;
+    return KURDISH_LETTERS.test(query) ? 'ckb' : 'ar';
+  };
   const searches = new TtlCache<Place[]>(10 * 60_000, 500);
   const routeCache = new TtlCache<RawRoute[]>(60_000, 200);
 
@@ -331,24 +471,60 @@ export function osmProvider(config: { photonUrl: string; osrmUrl: string }): Geo
     return photonPlaces(json.features ?? []);
   }
 
+  /** Places of these kinds (OpenStreetMap tags) within [radiusKm], nearest first. */
+  async function nearestOfKind(tags: string[], near: LatLng, lang: string, radiusKm: number) {
+    const url = new URL('/reverse', config.photonUrl);
+    url.searchParams.set('lat', near.lat.toFixed(5));
+    url.searchParams.set('lon', near.lng.toFixed(5));
+    url.searchParams.set('radius', String(radiusKm));
+    url.searchParams.set('limit', String(MAX_RESULTS + 8));
+    url.searchParams.set('lang', lang);
+    for (const t of tags) url.searchParams.append('osm_tag', t);
+    const json = (await getJson(url.toString())) as { features?: PhotonFeature[] };
+    return iraqOnly(photonPlaces(json.features ?? []))
+      .map((p) => ({ ...p, distanceM: Math.round(distanceMeters(near.lat, near.lng, p.lat!, p.lng!)) }))
+      .sort((a, b) => a.distanceM - b.distanceM);
+  }
+
   return {
     async search(query, near, lang) {
-      const key = [query.toLowerCase(), near?.lat.toFixed(2), near?.lng.toFixed(2), lang].join('|');
+      const key = [normalizeQuery(query), near?.lat.toFixed(2), near?.lng.toFixed(2), lang].join('|');
       const cached = searches.get(key);
       if (cached) return cached;
-      // Around the driver (~25 km), inside Iraq, and anywhere: Photon ranks
-      // by name, so without the boxes "mall" finds Mosul before Duhok.
-      const [local, home, world] = await Promise.allSettled([
-        near ? photon(query, near, lang, localBox(near)) : Promise.resolve([]),
-        photon(query, near, lang, HOME_COUNTRY.bbox),
-        photon(query, near, lang),
+
+      // A kind of place ("cafe", "مطعم"...): the nearest ones, within 10 km,
+      // or 50 km when there are few. Without the driver's position, a
+      // normal search.
+      const searchLang = langFor(query, lang);
+      const kind = placeKindOf(query);
+      if (kind && near) {
+        let found = await nearestOfKind(kind, near, searchLang, 10);
+        if (found.length < 5) found = await nearestOfKind(kind, near, searchLang, 50);
+        if (found.length) {
+          const places = found.slice(0, MAX_RESULTS).map(toPlace);
+          searches.set(key, places);
+          return places;
+        }
+      }
+
+      // Around the driver (~25 km), then the rest of Iraq: Photon ranks by
+      // name, so without the small box "mall" finds Mosul before Duhok.
+      // Only places in Iraq: the box around Iraq also covers bits of Syria,
+      // Turkey and Iran.
+      // Arabic and Kurdish: as typed, and in the simplified spelling, so
+      // "اربيل" also finds أربيل (see normalizeQuery and photon/prepare.jq).
+      const spellings = ARABIC_SCRIPT.test(query) ? [...new Set([query.trim(), normalizeQuery(query)])] : [query];
+      // All Iraq without the driver's position: it would rank a shop nearby
+      // named "Erbil" above the city of Erbil (the small box finds what's near).
+      const results = await Promise.allSettled([
+        ...(near ? spellings.map((q) => photon(q, near, searchLang, localBox(near))) : []),
+        ...spellings.map((q) => photon(q, null, searchLang, HOME_COUNTRY.bbox)),
       ]);
-      if (home.status === 'rejected' && world.status === 'rejected') throw unavailable();
-      const lists = [local, home, world].map((r) => (r.status === 'fulfilled' ? r.value : []));
-      const nearby = new Set(lists[0]!.map((p) => p.id));
-      const places = homeFirst(lists, (p) => nearby.has(p.id) || (p as Place & { country: string }).country === HOME_COUNTRY.code).map(
-        ({ country: _country, ...p }: Place & { country?: string }) => p,
-      );
+      if (results.every((r) => r.status === 'rejected')) throw unavailable();
+      const lists = results.map((r) => (r.status === 'fulfilled' ? iraqOnly(r.value) : []));
+      const places = citiesFirst(homeFirst(lists, () => true, 40), query)
+        .slice(0, MAX_RESULTS)
+        .map((p) => toPlace(p as PhotonPlace));
       searches.set(key, places);
       return places;
     },
@@ -538,16 +714,19 @@ export function googleProvider(
 
   return {
     async search(query, near, lang, session) {
-      const [home, world] = await Promise.allSettled([
-        autocomplete(query, near, lang, session, true),
-        autocomplete(query, near, lang, session, false),
-      ]);
-      if (home.status === 'rejected' && world.status === 'rejected') {
+      // A kind of place ("cafe", "مطعم"...) near the driver: OpenStreetMap
+      // lists the nearest ones of that kind; Google would match names.
+      if (near && placeKindOf(query)) {
+        const nearest = await fallback.search(query, near, lang, session).catch(() => []);
+        if (nearest.length) return nearest;
+      }
+      // Only places in Iraq.
+      let places: Place[];
+      try {
+        places = homeFirst([await autocomplete(query, near, lang, session, true)], () => true);
+      } catch {
         return fallback.search(query, near, lang, session);
       }
-      const homeList = home.status === 'fulfilled' ? home.value : [];
-      const homeIds = new Set(homeList.map((p) => p.id));
-      const places = homeFirst([homeList, world.status === 'fulfilled' ? world.value : []], (p) => homeIds.has(p.id));
       // Nothing on Google: OpenStreetMap may still know it.
       return places.length ? places : fallback.search(query, near, lang, session);
     },

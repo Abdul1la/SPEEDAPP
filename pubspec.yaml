@@ -71,6 +71,8 @@ flutter:
     - assets/sounds/
     # Built-in warning sounds (Settings → Warning sounds).
     - assets/sounds/tones/
+    # The driver's car on the map (made by tool/render_car.py).
+    - assets/images/
 
   # App font: Inter (SIL Open Font License, see assets/fonts/OFL-Inter.txt)
   fonts:

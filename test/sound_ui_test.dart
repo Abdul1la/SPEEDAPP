@@ -38,7 +38,9 @@ void main() {
         home: SettingsScreen(app: app),
       ),
     );
+    // Sounds have their own page.
     await tester.scrollUntilVisible(find.text('Warning sounds'), 300);
+    await tester.tap(find.text('Warning sounds'));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
@@ -81,6 +83,9 @@ void main() {
         home: SettingsScreen(app: app),
       ),
     );
+    await tester.scrollUntilVisible(find.text('Warning sounds'), 300);
+    await tester.tap(find.text('Warning sounds'));
+    await tester.pumpAndSettle();
     await tester.scrollUntilVisible(find.text('Chime + voice'), 300);
     await tester.pumpAndSettle();
 

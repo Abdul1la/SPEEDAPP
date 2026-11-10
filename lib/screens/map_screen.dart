@@ -7,10 +7,13 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../app_controller.dart';
 import '../map/map_styles.dart';
+import '../map/car_turn.dart';
 import '../map/marker_icons.dart';
+import '../map/visible_pins.dart';
 import '../models/app_settings.dart';
 import '../models/route_plan.dart';
 import '../models/speed_point.dart';
+import '../services/alert_engine.dart' show DriveSample;
 import '../services/api_client.dart';
 import '../services/location_service.dart';
 import '../theme/app_theme.dart';
@@ -39,7 +42,8 @@ class MapScreen extends StatefulWidget {
   State<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> {
+class _MapScreenState extends State<MapScreen>
+    with SingleTickerProviderStateMixin {
   // Where the map starts before the first GPS fix.
   static const _fallbackCamera = CameraPosition(
     target: LatLng(30, 30),
@@ -63,6 +67,44 @@ class _MapScreenState extends State<MapScreen> {
   Object? _lastFollowed;
   double _bearing = 0;
   late final AppLifecycleListener _lifecycle;
+
+  /// The car's angle on the map as shown now. It turns smoothly to each new
+  /// driving direction (see [CarTurn]), ahead of the map's own turn. Only
+  /// the map is redrawn while it turns, not the panels.
+  final ValueNotifier<double?> _carAngle = ValueNotifier(null);
+  CarTurn? _turn;
+  late final AnimationController _carTurn =
+      AnimationController(vsync: this, duration: CarTurn.duration)
+        ..addListener(() {
+          final turn = _turn;
+          if (turn != null) _carAngle.value = turn.at(_carTurn.value);
+        });
+
+  /// The part of the map on screen (known once the camera stops), so only
+  /// the pins there and near the car are drawn.
+  final ValueNotifier<LatLngBounds?> _view = ValueNotifier(null);
+
+  /// Changes when new pin icons are ready.
+  final ValueNotifier<int> _iconsVersion = ValueNotifier(0);
+
+  /// Everything the map is drawn from; the panels only follow [app].
+  late final Listenable _mapInputs = Listenable.merge([
+    app,
+    _carAngle,
+    _view,
+    _iconsVersion,
+  ]);
+
+  // Pins chosen for the screen, made again only when their inputs change.
+  List<SpeedPoint>? _pinsFrom;
+  LatLngBounds? _pinsView;
+  (int, int)? _pinsCarCell;
+  List<SpeedPoint> _pins = const [];
+
+  /// One marker per point, kept while the point, its icon and the test
+  /// drive mode stay the same (so the map isn't sent unchanged pins).
+  final Map<String, (SpeedPoint, BitmapDescriptor, bool, Marker)> _markers = {};
+  List<SpeedPoint>? _iconsCheckedFor;
 
   /// Choosing a route: the sheet covers the bottom half of the map.
   bool _planning = false;
@@ -100,11 +142,30 @@ class _MapScreenState extends State<MapScreen> {
     _messages?.cancel();
     app.removeListener(_onAppChanged);
     _lifecycle.dispose();
+    _carTurn.dispose();
+    _carAngle.dispose();
+    _view.dispose();
+    _iconsVersion.dispose();
     super.dispose();
+  }
+
+  /// Turns the car to [angle] smoothly, the short way round.
+  void _turnCarTo(double? angle) {
+    if (angle == null) return;
+    final shown = _carAngle.value;
+    if (shown == null) {
+      _carAngle.value = angle; // first fix: no turn
+      return;
+    }
+    final aim = _turn != null && _carTurn.isAnimating ? _turn!.to : shown;
+    if (shortestTurn(aim, angle).abs() < 0.5) return; // already there
+    _turn = CarTurn(shown, angle);
+    _carTurn.forward(from: 0);
   }
 
   void _onAppChanged() {
     final pos = app.position;
+    _turnCarTo(app.course ?? pos?.heading);
     if (_overview) {
       if (!app.routeActive) {
         // Route ended (arrived): back to following the car.
@@ -134,6 +195,9 @@ class _MapScreenState extends State<MapScreen> {
           tilt: moving ? 45 : 0,
         ),
       ),
+      // Slower than the car's own turn (CarTurn.duration), so the car turns
+      // first and the map follows: a left turn looks left.
+      duration: const Duration(milliseconds: 1000),
     );
   }
 
@@ -146,14 +210,18 @@ class _MapScreenState extends State<MapScreen> {
     if (pos != null) _moveCameraTo(pos.lat, pos.lng, pos.speedKmh);
   }
 
-  /// The user moved the map somewhere: load the cameras and bumps there
+  /// The camera stopped: remember what is on screen (for the pins), and if
+  /// the user moved the map somewhere, load the cameras and bumps there
   /// (another city, for example). While the map follows the car, the
   /// driver's own area is already loaded.
   Future<void> _loadVisibleArea() async {
     final map = _map;
-    if (map == null || _follow) return;
+    if (map == null) return;
     try {
       final b = await map.getVisibleRegion();
+      if (!mounted) return;
+      _view.value = b;
+      if (_follow) return;
       final lat = (b.northeast.latitude + b.southwest.latitude) / 2;
       final lng = (b.northeast.longitude + b.southwest.longitude) / 2;
       final km =
@@ -176,7 +244,7 @@ class _MapScreenState extends State<MapScreen> {
     final dpr = MediaQuery.devicePixelRatioOf(context);
     final changed = await _icons.prepare(app.mapPoints, dpr);
     _drawingIcons = false;
-    if (changed && mounted) setState(() {});
+    if (changed && mounted) _iconsVersion.value++;
   }
 
   void _toast(String message, {SnackBarAction? action}) {
@@ -446,12 +514,23 @@ class _MapScreenState extends State<MapScreen> {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: darkMap ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark,
       child: Scaffold(
-        body: ListenableBuilder(
-          listenable: app,
-          builder: (context, _) {
-            if (!_icons.hasAll(app.mapPoints)) _prepareIcons();
-            return Stack(children: [_buildMap(), _buildTop(), _buildBottom()]);
-          },
+        // Three parts redrawn on their own: the map (also for each frame of
+        // the car turning), and the top and bottom panels (on app changes).
+        body: Stack(
+          children: [
+            ListenableBuilder(
+              listenable: _mapInputs,
+              builder: (context, _) => _buildMap(),
+            ),
+            ListenableBuilder(
+              listenable: app,
+              builder: (context, _) => RepaintBoundary(child: _buildTop()),
+            ),
+            ListenableBuilder(
+              listenable: app,
+              builder: (context, _) => _buildBottom(),
+            ),
+          ],
         ),
       ),
     );
@@ -463,20 +542,16 @@ class _MapScreenState extends State<MapScreen> {
     final pos = app.position;
     final active = app.active;
 
+    final all = app.mapPoints;
+    if (!identical(all, _iconsCheckedFor)) {
+      _iconsCheckedFor = all;
+      final ids = {for (final p in all) p.id};
+      _markers.removeWhere((id, _) => !ids.contains(id));
+      if (!_icons.hasAll(all)) _prepareIcons();
+    }
     final markers = <Marker>{
-      // My points and other drivers' points.
-      for (final pt in app.mapPoints)
-        Marker(
-          markerId: MarkerId(pt.id),
-          position: LatLng(pt.lat, pt.lng),
-          icon: _icons.iconFor(pt),
-          anchor: MarkerIcons.pinAnchor,
-          consumeTapEvents: true,
-          onTap: () => _openEditor(existing: pt),
-          // Hold and drag a pin to move it (only my own points).
-          draggable: !app.isSimulating && !pt.community,
-          onDragEnd: (to) => _movePoint(pt, to),
-        ),
+      // My points and other drivers' points: those on screen and nearby.
+      for (final pt in _visiblePins(all, pos)) _markerFor(pt),
       // My car (instead of the blue dot). It lies flat on the map, pointing
       // where I'm driving; faded until the GPS has a live fix.
       if (pos != null && _icons.car != null)
@@ -485,7 +560,7 @@ class _MapScreenState extends State<MapScreen> {
           position: LatLng(pos.lat, pos.lng),
           icon: _icons.car!,
           flat: true,
-          rotation: app.course ?? pos.heading ?? 0,
+          rotation: _carAngle.value ?? app.course ?? pos.heading ?? 0,
           anchor: const Offset(0.5, 0.5),
           alpha: app.isSimulating || app.livePosition != null ? 1 : 0.55,
           zIndexInt: 10,
@@ -494,26 +569,7 @@ class _MapScreenState extends State<MapScreen> {
         ),
     };
 
-    final options = app.routeOptions;
-    _lines.removeWhere((r, _) => !options.contains(r));
-    final polylines = <Polyline>{
-      for (var i = 0; i < options.length; i++)
-        if (!app.routeActive || i == app.selectedRoute)
-          Polyline(
-            polylineId: PolylineId('route$i'),
-            points: _lineFor(options[i]),
-            color: i == app.selectedRoute
-                ? p.primary
-                : p.textTertiary.withValues(alpha: 0.8),
-            width: i == app.selectedRoute ? 7 : 5,
-            zIndex: i == app.selectedRoute ? 2 : 1,
-            consumeTapEvents: true,
-            onTap: () => app.selectRoute(i),
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            jointType: JointType.round,
-          ),
-    };
+    final polylines = _routeLines(p);
     final dest = app.destination;
     if (dest != null) {
       markers.add(
@@ -590,6 +646,94 @@ class _MapScreenState extends State<MapScreen> {
         onLongPress: (latLng) => _openEditor(at: latLng),
       ),
     );
+  }
+
+  // Route lines, made again only when the routes or the chosen one change.
+  List<RouteOption>? _linesOf;
+  bool? _linesActive;
+  int? _linesSelected;
+  Palette? _linesPalette;
+  Set<Polyline> _polylines = const {};
+
+  Set<Polyline> _routeLines(Palette p) {
+    final options = app.routeOptions;
+    if (identical(options, _linesOf) &&
+        app.routeActive == _linesActive &&
+        app.selectedRoute == _linesSelected &&
+        identical(p, _linesPalette)) {
+      return _polylines;
+    }
+    _linesOf = options;
+    _linesActive = app.routeActive;
+    _linesSelected = app.selectedRoute;
+    _linesPalette = p;
+    _lines.removeWhere((r, _) => !options.contains(r));
+    return _polylines = <Polyline>{
+      for (var i = 0; i < options.length; i++)
+        if (!app.routeActive || i == app.selectedRoute)
+          Polyline(
+            polylineId: PolylineId('route$i'),
+            points: _lineFor(options[i]),
+            color: i == app.selectedRoute
+                ? p.primary
+                : p.textTertiary.withValues(alpha: 0.8),
+            width: i == app.selectedRoute ? 7 : 5,
+            zIndex: i == app.selectedRoute ? 2 : 1,
+            consumeTapEvents: true,
+            onTap: () => app.selectRoute(i),
+            startCap: Cap.roundCap,
+            endCap: Cap.roundCap,
+            jointType: JointType.round,
+          ),
+    };
+  }
+
+  /// The pins to draw now (see [pinsToShow]). Chosen again only when the
+  /// points, the screen, or the car's square kilometer change.
+  List<SpeedPoint> _visiblePins(List<SpeedPoint> all, DriveSample? pos) {
+    final view = _view.value;
+    final cell = pos == null
+        ? null
+        : ((pos.lat * 100).round(), (pos.lng * 100).round());
+    if (identical(all, _pinsFrom) &&
+        view == _pinsView &&
+        cell == _pinsCarCell) {
+      return _pins;
+    }
+    _pinsFrom = all;
+    _pinsView = view;
+    _pinsCarCell = cell;
+    return _pins = pinsToShow(
+      all,
+      view: view,
+      carLat: pos?.lat,
+      carLng: pos?.lng,
+    );
+  }
+
+  Marker _markerFor(SpeedPoint pt) {
+    final icon = _icons.iconFor(pt);
+    final sim = app.isSimulating;
+    final kept = _markers[pt.id];
+    if (kept != null &&
+        identical(kept.$1, pt) &&
+        identical(kept.$2, icon) &&
+        kept.$3 == sim) {
+      return kept.$4;
+    }
+    final marker = Marker(
+      markerId: MarkerId(pt.id),
+      position: LatLng(pt.lat, pt.lng),
+      icon: icon,
+      anchor: MarkerIcons.pinAnchor,
+      consumeTapEvents: true,
+      onTap: () => _openEditor(existing: pt),
+      // Hold and drag a pin to move it (only my own points).
+      draggable: !sim && !pt.community,
+      onDragEnd: (to) => _movePoint(pt, to),
+    );
+    _markers[pt.id] = (pt, icon, sim, marker);
+    return marker;
   }
 
   Widget _buildTop() {

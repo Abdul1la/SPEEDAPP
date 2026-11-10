@@ -46,3 +46,7 @@ app.*.map.json
 
 # Live APKs made by build-apk.command
 /apk/
+
+# 3D models used by tool/render_car.py (large; download them, see assets/images/CREDITS.md)
+*.glb
+*.gltf

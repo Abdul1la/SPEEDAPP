@@ -438,8 +438,10 @@ class SpeedGauge extends StatelessWidget {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
+                          // The number is the GPS speed right now (only
+                          // the ring glides), so it never lags the car.
                           Text(
-                            v.round().toString(),
+                            kmh.round().toString(),
                             style: numberStyle(
                               size * 0.36,
                               color: fg,
