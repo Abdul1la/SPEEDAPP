@@ -80,6 +80,33 @@ Then put HTTPS in front of port 3000 (for example [Caddy](https://caddyserver.co
 `caddy reverse-proxy --from api.yourdomain.com --to localhost:3000`) and set
 `TRUST_PROXY=true` in `.env`. The app must use `https://` in production.
 
+### Place search for Iraq (our own search server)
+
+Search shows **places in Iraq only**: cities and towns first ("Erbil", "اربيل",
+"هەولێر" all find the city), then streets, shops and everything else. A kind
+of place, like **cafe, restaurant, hospital, pharmacy, fuel, hotel, mall,
+supermarket, bakery, bank, mosque, park, school or police**, in English, Arabic
+or Kurdish ("مطعم", "بەنزینخانە"...), lists the nearest ones with their
+distance.
+
+The public search server (photon.komoot.io) blocks servers that send many
+searches, so the API uses **its own** (`photon/`): Photon with OpenStreetMap's
+Iraq data (about 200,000 places, refreshed daily by GraphHopper), with
+Arabic, Kurdish and English names. `photon/prepare.jq` also stores each
+Arabic/Kurdish name in a simplified spelling (أربيل → اربيل, ھ/ە → ه,
+ی → ي, ک → ك), and the API simplifies what people type the same way.
+
+- **Locally:** `docker compose up -d --build` starts it with the API. The
+  first start loads Iraq (about a minute, 1.3 GB of memory while loading;
+  about 500 MB after).
+- **On Railway:** add a service from this repo with root directory
+  `backend/photon`, a volume mounted at `/photon/data`, and at least 1.5 GB
+  of memory. On the API service, set
+  `PHOTON_URL=http://<photon service>.railway.internal:2322` (its private
+  address). New places: redeploy the photon service with `PHOTON_REFRESH=1`
+  once.
+- Without `PHOTON_URL`, the public server is used (fine for testing).
+
 ### Better place search (Google Places)
 
 Search works without any key, using OpenStreetMap. In Iraq OpenStreetMap

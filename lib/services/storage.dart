@@ -1,10 +1,20 @@
 import 'dart:convert';
+import 'dart:isolate';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/app_settings.dart';
 import '../models/route_plan.dart';
 import '../models/speed_point.dart';
+
+/// Big lists (thousands of points) are read and written on a background
+/// isolate, so the map doesn't stutter; small ones right away (starting an
+/// isolate costs more than that).
+Future<T> _offMain<T>(int size, T Function() work) =>
+    size > _bigData ? Isolate.run(work) : Future.sync(work);
+
+/// About 250 points, in characters of JSON.
+const _bigData = 50000;
 
 /// Saves points and settings on the phone.
 class Storage {
@@ -17,14 +27,16 @@ class Storage {
     final raw = await _prefs.getString(_pointsKey);
     if (raw == null) return [];
     try {
-      return parsePoints(raw);
+      return await _offMain(raw.length, () => parsePoints(raw));
     } on FormatException {
       return [];
     }
   }
 
-  Future<void> savePoints(List<SpeedPoint> points) =>
-      _prefs.setString(_pointsKey, exportPoints(points));
+  Future<void> savePoints(List<SpeedPoint> points) async => _prefs.setString(
+    _pointsKey,
+    await _offMain(points.length * 200, () => exportPoints(points)),
+  );
 
   Future<AppSettings> loadSettings() async {
     final raw = await _prefs.getString(_settingsKey);
@@ -49,19 +61,23 @@ class Storage {
     final raw = await _prefs.getString(_communityKey);
     if (raw == null) return [];
     try {
-      return [
-        for (final m
-            in (jsonDecode(raw) as List).whereType<Map<String, dynamic>>())
-          SpeedPoint.fromJson(m),
-      ];
+      return await _offMain(raw.length, () => _parseCommunity(raw));
     } catch (_) {
       return [];
     }
   }
 
-  Future<void> saveCommunity(List<SpeedPoint> points) => _prefs.setString(
+  static List<SpeedPoint> _parseCommunity(String raw) => [
+    for (final m in (jsonDecode(raw) as List).whereType<Map<String, dynamic>>())
+      SpeedPoint.fromJson(m),
+  ];
+
+  Future<void> saveCommunity(List<SpeedPoint> points) async => _prefs.setString(
     _communityKey,
-    jsonEncode([for (final p in points) p.toJson()]),
+    await _offMain(
+      points.length * 200,
+      () => jsonEncode([for (final p in points) p.toJson()]),
+    ),
   );
 
   static const _recentPlacesKey = 'recent_places_v1';

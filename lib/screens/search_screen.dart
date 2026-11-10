@@ -23,7 +23,7 @@ Future<Place?> showPlaceSearch(BuildContext context, AppController app) =>
     );
 
 /// Search as you type ("Duhok", a street, a shop...), with recent places.
-/// Places in Iraq come first, then the rest of the world.
+/// Places in Iraq only (cities first; "cafe", "مطعم"... lists the nearest).
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key, required this.app, this.storage});
 
@@ -235,7 +235,7 @@ class _SearchScreenState extends State<SearchScreen> {
                     _Hint(
                       icon: Icons.travel_explore_rounded,
                       text:
-                          'Type a city, area, street, shop, restaurant or mall. Places in Iraq come first. Then pick the way to drive there; the app shows the speed cameras and bumps on each way.',
+                          'Type a city, area, street, shop or mall, in English, Arabic or Kurdish. Or a kind of place, like cafe, restaurant or fuel, to see the nearest. Places in Iraq only. Then pick the way to drive there; the app shows the speed cameras and bumps on each way.',
                     ),
                   if (!showRecent && _error != null)
                     _Hint(icon: Icons.search_off_rounded, text: _error!),

@@ -341,8 +341,9 @@ const SMALL_PLACES = new Set(['district', 'county', 'municipality', 'village', '
  * provinces first, then smaller places, then everything else (in order).
  */
 export function citiesFirst<T extends Place>(places: T[], query: string): T[] {
-  // Without the Arabic "ال" ("البصرة" is "بصرة" on the map).
-  const bare = (s: string) => normalizeQuery(s).replace(/(^| )ال/g, '$1');
+  // Without the Arabic "ال" or "Al-" ("البصرة" is "بصرة" on the map, "Najaf"
+  // is "Al-Najaf").
+  const bare = (s: string) => normalizeQuery(s).replace(/(^| )(ال|al )/g, '$1');
   const q = bare(query);
   const rank = (p: T) => {
     if (!q || !bare(p.name).startsWith(q)) return 3;

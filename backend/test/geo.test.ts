@@ -647,4 +647,5 @@ test('"cities first" ignores the Arabic "ال"', () => {
   const place = (name: string, kind: string): Place => ({ id: name + kind, name, address: '', lat: 0, lng: 0, kind });
   const found = [place('البصرة', 'motel'), place('بصرة', 'city')];
   assert.deepEqual(citiesFirst(found, 'البصرة').map((p) => p.kind), ['city', 'motel']);
+  assert.equal(citiesFirst([place('Najaf', 'state'), place('Al-Najaf', 'city')], 'Najaf')[0]!.kind, 'city');
 });
