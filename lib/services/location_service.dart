@@ -7,6 +7,7 @@ import '../models/speed_point.dart';
 import '../utils/geo.dart';
 import 'alert_engine.dart';
 import 'notification_permission.dart';
+import 'speed_filter.dart';
 
 enum LocationStatus { ok, serviceOff, denied, deniedForever }
 
@@ -73,9 +74,15 @@ class LocationService {
     } else {
       settings = const LocationSettings(accuracy: LocationAccuracy.best);
     }
-    return Geolocator.getPositionStream(
-      locationSettings: settings,
-    ).map(_toSample);
+    // Phones report a made-up speed when standing still: clean it up.
+    final filter = SpeedFilter();
+    return Geolocator.getPositionStream(locationSettings: settings).map(
+      (p) => filter.add(
+        _toSample(p),
+        accuracyM: p.accuracy.isFinite ? p.accuracy : 0,
+        speedAccuracyMps: p.speedAccuracy.isFinite ? p.speedAccuracy : 0,
+      ),
+    );
   }
 
   Future<void> openSettings() async {

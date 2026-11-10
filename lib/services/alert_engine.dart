@@ -12,10 +12,15 @@ class DriveSample {
     required this.speedMps,
     required this.time,
     this.heading,
+    this.stationary = false,
   });
 
   final double lat;
   final double lng;
+
+  /// The phone is standing still (see SpeedFilter): its position is only
+  /// GPS wobble, so it must not change the driving direction.
+  final bool stationary;
 
   /// Speed in meters per second (0 if unknown).
   final double speedMps;
@@ -272,6 +277,8 @@ class AlertEngine {
   }
 
   void _updateCourse(DriveSample s) {
+    // Standing still: keep the direction we were driving in.
+    if (s.stationary) return;
     final h = s.heading;
     if (h != null && h >= 0 && s.speedMps >= _minSpeedForGpsHeading) {
       _course = normalizeDegrees(h);

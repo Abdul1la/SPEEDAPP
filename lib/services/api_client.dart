@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import '../models/route_plan.dart';
+
 /// The live server (used by release builds unless API_URL is set).
 const liveApiUrl = 'https://speedapp-production.up.railway.app';
 
@@ -181,4 +183,41 @@ class ApiClient {
 
   Future<void> putSettings(Map<String, dynamic> settings) =>
       _send('PUT', '/v1/me/settings', body: {'settings': settings});
+
+  // ---- Search and directions ----
+
+  /// Places matching [query] (search as you type), nearest to (lat, lng)
+  /// first when given.
+  Future<List<Place>> places(String query, {double? lat, double? lng}) async {
+    final json = await _send(
+      'GET',
+      '/v1/places',
+      query: {
+        'q': query,
+        if (lat != null && lng != null) ...{
+          'lat': lat.toStringAsFixed(5),
+          'lng': lng.toStringAsFixed(5),
+        },
+      },
+    );
+    return [
+      for (final p in (json['places'] as List).cast<Map<String, dynamic>>())
+        Place.fromJson(p),
+    ];
+  }
+
+  /// Driving routes, fastest first, with the cameras and bumps on each.
+  Future<Map<String, dynamic>> routes(
+    double fromLat,
+    double fromLng,
+    double toLat,
+    double toLng,
+  ) => _send(
+    'GET',
+    '/v1/routes',
+    query: {
+      'from': '${fromLat.toStringAsFixed(6)},${fromLng.toStringAsFixed(6)}',
+      'to': '${toLat.toStringAsFixed(6)},${toLng.toStringAsFixed(6)}',
+    },
+  );
 }

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/app_settings.dart';
+import '../models/route_plan.dart';
 import '../models/speed_point.dart';
 
 /// Saves points and settings on the phone.
@@ -61,6 +62,28 @@ class Storage {
   Future<void> saveCommunity(List<SpeedPoint> points) => _prefs.setString(
     _communityKey,
     jsonEncode([for (final p in points) p.toJson()]),
+  );
+
+  static const _recentPlacesKey = 'recent_places_v1';
+
+  /// Places picked in search lately, newest first.
+  Future<List<Place>> loadRecentPlaces() async {
+    final raw = await _prefs.getString(_recentPlacesKey);
+    if (raw == null) return [];
+    try {
+      return [
+        for (final m
+            in (jsonDecode(raw) as List).whereType<Map<String, dynamic>>())
+          Place.fromJson(m),
+      ];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> saveRecentPlaces(List<Place> places) => _prefs.setString(
+    _recentPlacesKey,
+    jsonEncode([for (final p in places) p.toJson()]),
   );
 
   /// Sign-in token and sync progress (see SyncService).
