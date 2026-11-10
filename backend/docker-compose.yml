@@ -1,0 +1,44 @@
+# Local development and simple self-hosting:
+#   docker compose up -d db        # just MySQL (for `npm run dev` / `npm test`)
+#   docker compose up -d --build   # MySQL + the API on http://localhost:3000
+#
+# The project name keeps these containers separate from other projects whose
+# folder is also called "backend".
+name: speedalert
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me-root}
+      MYSQL_DATABASE: speedalert
+      MYSQL_USER: speedalert
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-speedalert}
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - db-data:/var/lib/mysql
+      - ./docker/mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: mysql://speedalert:${MYSQL_PASSWORD:-speedalert}@db:3306/speedalert
+      PORT: "3000"
+      HOST: 0.0.0.0
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      MAX_POINTS_PER_DAY: ${MAX_POINTS_PER_DAY:-100}
+    ports:
+      - "3000:3000"
+
+volumes:
+  db-data:

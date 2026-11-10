@@ -1,0 +1,97 @@
+import { fileURLToPath } from 'node:url';
+
+import rateLimit from '@fastify/rate-limit';
+import fastifyStatic from '@fastify/static';
+import Fastify from 'fastify';
+import type { FastifyError, FastifyInstance, FastifyServerOptions } from 'fastify';
+
+import type { Config } from './config.ts';
+import { selectOne } from './db.ts';
+import type { Db } from './db.ts';
+import { ApiError } from './lib/errors.ts';
+import { adminRoutes } from './routes/admin.ts';
+import { authRoutes } from './routes/auth.ts';
+import { meRoutes } from './routes/me.ts';
+import { pointRoutes } from './routes/points.ts';
+
+export interface Deps {
+  db: Db;
+  config: Config;
+}
+
+const ADMIN_DIR = fileURLToPath(new URL('../admin/', import.meta.url));
+
+/** Builds the HTTP API (without listening), so tests can call it directly. */
+export async function buildApp(
+  deps: Deps,
+  logger: FastifyServerOptions['logger'] = { level: deps.config.logLevel },
+): Promise<FastifyInstance> {
+  const app = Fastify({
+    logger,
+    trustProxy: deps.config.trustProxy,
+    bodyLimit: 64 * 1024,
+  });
+  app.decorateRequest('user', null);
+
+  // Every error has the same shape: { "error": { "code", "message" } }.
+  app.setErrorHandler((err: FastifyError | ApiError, request, reply) => {
+    if (err instanceof ApiError) {
+      return reply.code(err.status).send({ error: { code: err.code, message: err.message } });
+    }
+    if ((err as FastifyError).validation) {
+      return reply.code(400).send({ error: { code: 'invalid_request', message: err.message } });
+    }
+    const status = (err as FastifyError).statusCode ?? 500;
+    if (status < 500) {
+      return reply
+        .code(status)
+        .send({ error: { code: (err as FastifyError).code ?? 'bad_request', message: err.message } });
+    }
+    request.log.error({ err }, 'Request failed');
+    return reply.code(500).send({ error: { code: 'server_error', message: 'Something went wrong. Try again.' } });
+  });
+  app.setNotFoundHandler((request, reply) =>
+    reply.code(404).send({ error: { code: 'not_found', message: `No route ${request.method} ${request.url}` } }),
+  );
+
+  // Per signed-in phone (or per IP before signing in). Routes can set
+  // stricter limits with `config: { rateLimit: {...} }`.
+  if (deps.config.rateLimit) {
+    await app.register(rateLimit, {
+      max: 600,
+      timeWindow: '1 minute',
+      keyGenerator: (request) => request.headers.authorization ?? request.ip,
+      errorResponseBuilder: (_request, context) =>
+        Object.assign(new ApiError(429, 'rate_limited', `Too many requests. Try again in ${context.after}.`), {
+          statusCode: 429,
+        }),
+    });
+  }
+
+  app.get('/health', { config: { rateLimit: false } }, async () => {
+    await selectOne(deps.db, 'SELECT 1 AS ok');
+    return { ok: true };
+  });
+
+  await app.register(authRoutes(deps), { prefix: '/v1/auth' });
+  await app.register(pointRoutes(deps), { prefix: '/v1/points' });
+  await app.register(meRoutes(deps), { prefix: '/v1/me' });
+  await app.register(adminRoutes(deps), { prefix: '/v1/admin' });
+
+  // Admin panel (static page that uses /v1/admin).
+  await app.register(fastifyStatic, {
+    root: ADMIN_DIR,
+    prefix: '/admin/',
+    setHeaders: (res) => {
+      res.header(
+        'Content-Security-Policy',
+        "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+      );
+      res.header('X-Content-Type-Options', 'nosniff');
+      res.header('Referrer-Policy', 'no-referrer');
+    },
+  });
+  app.get('/admin', (_request, reply) => reply.redirect('/admin/'));
+
+  return app;
+}

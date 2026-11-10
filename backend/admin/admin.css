@@ -1,0 +1,140 @@
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --border: #e3e6eb;
+  --text: #15181e;
+  --muted: #646b78;
+  --primary: #2563eb;
+  --danger: #dc2626;
+  --success: #16a34a;
+  --warning: #d97706;
+  --camera: #e11d48;
+  --bump: #d97706;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115;
+    --surface: #181b21;
+    --border: #2a2f38;
+    --text: #e8eaee;
+    --muted: #98a0ad;
+    --primary: #60a5fa;
+    --danger: #f87171;
+    --success: #4ade80;
+    --warning: #fbbf24;
+    --camera: #fb7185;
+    --bump: #fbbf24;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+/* `hidden` must win over classes that set display (.login, .pill, .inline-form). */
+[hidden] { display: none !important; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+button {
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 6px 12px;
+}
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+button.danger { color: var(--danger); }
+button.link { border: 0; background: none; color: var(--primary); padding: 0; }
+button:disabled { opacity: 0.5; cursor: default; }
+input, select, textarea {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+label { display: grid; gap: 4px; font-weight: 500; }
+.muted { color: var(--muted); }
+.error { color: var(--danger); min-height: 1.2em; margin: 0; }
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.login { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+.login-card { width: min(380px, 100%); display: grid; gap: 14px; }
+.login-card h1 { margin: 0; font-size: 22px; }
+.login-card p { margin: 0; }
+
+.top {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  align-items: center;
+  padding: 10px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.top nav { display: flex; gap: 4px; flex-wrap: wrap; }
+.top nav button { border-color: transparent; }
+.top nav button[aria-current="page"] { background: var(--bg); border-color: var(--border); font-weight: 600; }
+.me { margin-left: auto; color: var(--muted); font-size: 14px; }
+.pill {
+  display: inline-block;
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 12px;
+  text-align: center;
+}
+
+main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; }
+h2 { margin: 0 0 14px; font-size: 20px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+.toolbar input[type="search"] { min-width: 220px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
+.stat strong { display: block; font-size: 26px; }
+.list { display: grid; gap: 10px; }
+.row { display: grid; gap: 8px; }
+.row-head { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+.row-head .title { font-weight: 600; }
+.meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 13.5px; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+  border: 1px solid currentColor;
+}
+.tag.camera { color: var(--camera); }
+.tag.bump { color: var(--bump); }
+.tag.active { color: var(--success); }
+.tag.hidden { color: var(--warning); }
+.tag.removed, .tag.banned { color: var(--danger); }
+.tag.role { color: var(--primary); }
+.inline-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; padding-top: 6px; border-top: 1px dashed var(--border); }
+.empty { padding: 30px; text-align: center; color: var(--muted); }
+.pager { display: flex; gap: 8px; justify-content: center; margin-top: 14px; }
+.toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--text);
+  color: var(--bg);
+  padding: 10px 16px;
+  border-radius: 10px;
+  max-width: calc(100% - 32px);
+}
