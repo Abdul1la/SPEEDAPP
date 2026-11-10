@@ -6,7 +6,14 @@ import * as users from '../services/users.ts';
 import { credentialsBody, deviceName } from './schemas.ts';
 
 /** Strict limit for sign-in endpoints (guessing passwords, mass sign-ups). */
-const strict = { rateLimit: { max: 20, timeWindow: '1 minute' } };
+const strict = {
+  rateLimit: {
+    max: 20,
+    timeWindow: '1 minute',
+    // Per IP, whatever headers are sent, so passwords can't be guessed fast.
+    keyGenerator: (request: { ip: string }) => request.ip,
+  },
+};
 
 export function authRoutes({ db }: Deps): FastifyPluginAsync {
   return async (app) => {

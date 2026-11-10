@@ -5,12 +5,17 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+/// The live server (used by release builds unless API_URL is set).
+const liveApiUrl = 'https://speedapp-production.up.railway.app';
+
 /// Where the backend runs. Set it when building:
 ///   flutter run --dart-define=API_URL=https://api.example.com
-/// Without it: the computer running the app (Android emulator: 10.0.2.2).
+/// Without it: release builds use [liveApiUrl]; debug builds the computer
+/// running the app (Android emulator: 10.0.2.2).
 String defaultApiUrl() {
   const fromBuild = String.fromEnvironment('API_URL');
   if (fromBuild.isNotEmpty) return fromBuild;
+  if (kReleaseMode) return liveApiUrl;
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
     return 'http://10.0.2.2:3000';
   }

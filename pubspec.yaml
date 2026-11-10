@@ -69,6 +69,8 @@ flutter:
   # Your warning voices (see assets/sounds/README.md for the file names).
   assets:
     - assets/sounds/
+    # Built-in warning sounds (Settings → Warning sounds).
+    - assets/sounds/tones/
 
   # App font: Inter (SIL Open Font License, see assets/fonts/OFL-Inter.txt)
   fonts:

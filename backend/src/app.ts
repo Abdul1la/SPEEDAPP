@@ -20,15 +20,19 @@ export interface Deps {
 }
 
 const ADMIN_DIR = fileURLToPath(new URL('../admin/', import.meta.url));
+const TOKEN_HEADER = /^Bearer sa_[A-Za-z0-9_-]{43}$/;
 
 /** Builds the HTTP API (without listening), so tests can call it directly. */
 export async function buildApp(
   deps: Deps,
   logger: FastifyServerOptions['logger'] = { level: deps.config.logLevel },
 ): Promise<FastifyInstance> {
+  const hops = deps.config.trustProxy;
   const app = Fastify({
     logger,
-    trustProxy: deps.config.trustProxy,
+    // A number = trust only that many proxies in front of us (the client IP
+    // is the next address in X-Forwarded-For, which clients can't fake).
+    trustProxy: typeof hops === 'number' ? (_address: string, hop: number) => hop < hops : hops,
     bodyLimit: 64 * 1024,
   });
   app.decorateRequest('user', null);
@@ -60,7 +64,12 @@ export async function buildApp(
     await app.register(rateLimit, {
       max: 600,
       timeWindow: '1 minute',
-      keyGenerator: (request) => request.headers.authorization ?? request.ip,
+      // A made-up Authorization header must not give a fresh limit: only a
+      // well-formed token counts, anything else is limited by IP.
+      keyGenerator: (request) => {
+        const auth = request.headers.authorization;
+        return auth && TOKEN_HEADER.test(auth) ? auth : request.ip;
+      },
       errorResponseBuilder: (_request, context) =>
         Object.assign(new ApiError(429, 'rate_limited', `Too many requests. Try again in ${context.after}.`), {
           statusCode: 429,

@@ -2,7 +2,7 @@ import type { AuthUser } from '../auth/auth.ts';
 import { execute, select, selectOne, transaction } from '../db.ts';
 import type { Db, Queryable } from '../db.ts';
 import { badRequest, conflict, forbidden, notFound, tooMany } from '../lib/errors.ts';
-import { GEOM, angleDifference, boxWkt, pointWkt } from '../lib/geo.ts';
+import { GEOM, angleDifference, boxWkt, distanceMeters, pointWkt } from '../lib/geo.ts';
 
 export type PointType = 'camera' | 'bump';
 export type Visibility = 'public' | 'private';
@@ -19,8 +19,12 @@ export const RULES = {
   mergeAngle: 45,
   /** "Gone" votes needed to hide a point (and more than its confirmations + 1). */
   goneVotesToHide: 3,
-  /** Open reports from different drivers that hide a point until reviewed. */
+  /** Open reports from different drivers that hide a point until reviewed
+   * (and more reports than confirmations, so a few accounts can't wipe
+   * well-confirmed points). */
   reportsToHide: 3,
+  /** A point other drivers confirmed can't be moved further than this by its owner. */
+  maxOwnerMoveM: 200,
   maxRadiusM: 100_000,
   maxResults: 10_000,
   /** Changes are re-sent this long before the client's cursor, so none are missed. */
@@ -211,7 +215,15 @@ export async function recountPoints(conn: Queryable, ids: number[]): Promise<voi
   await execute(
     conn,
     `UPDATE points SET status = 'hidden', status_reason = 'reports'
-      WHERE id IN (?) AND status = 'active' AND report_count >= ?`,
+      WHERE id IN (?) AND status = 'active' AND report_count >= ? AND report_count > confirm_count`,
+    [list, RULES.reportsToHide],
+  );
+  // Reports dismissed by a moderator: the point comes back.
+  await execute(
+    conn,
+    `UPDATE points SET status = 'active', status_reason = NULL
+      WHERE id IN (?) AND status = 'hidden' AND status_reason = 'reports'
+        AND (report_count < ? OR report_count <= confirm_count)`,
     [list, RULES.reportsToHide],
   );
 }
@@ -220,7 +232,7 @@ async function upsertVote(conn: Queryable, pointId: number, userId: number, vote
   await execute(
     conn,
     `INSERT INTO point_votes (point_id, user_id, vote) VALUES (?, ?, ?) AS new
-     ON DUPLICATE KEY UPDATE vote = new.vote`,
+     ON DUPLICATE KEY UPDATE vote = new.vote, updated_at = CURRENT_TIMESTAMP(3)`,
     [pointId, userId, vote],
   );
 }
@@ -236,6 +248,28 @@ export interface CreateResult {
 }
 
 export async function createPoint(
+  db: Db,
+  user: AuthUser,
+  input: PointInput & { type: PointType; lat: number; lng: number },
+  maxPerDay: number,
+): Promise<CreateResult> {
+  try {
+    return await insertPoint(db, user, input, maxPerDay);
+  } catch (e) {
+    // The same upload sent twice at once: the second one returns the first.
+    if ((e as { code?: string }).code === 'ER_DUP_ENTRY' && input.clientId) {
+      const existing = await selectOne<PointRow>(
+        db,
+        selectPoints('p.created_by = ? AND p.client_id = ?'),
+        [user.id, user.id, input.clientId],
+      );
+      if (existing) return { point: toApiPoint(existing, user.id), created: false, merged: false };
+    }
+    throw e;
+  }
+}
+
+async function insertPoint(
   db: Db,
   user: AuthUser,
   input: PointInput & { type: PointType; lat: number; lng: number },
@@ -272,7 +306,8 @@ export async function createPoint(
       const near = await select<{ id: number; direction: number | null; created_by: number | null }>(
         conn,
         `SELECT p.id, p.direction, p.created_by FROM points p
-          WHERE p.type = ? AND p.status = 'active' AND p.visibility = 'public'
+          WHERE p.type = ? AND p.visibility = 'public'
+            AND (p.status = 'active' OR (p.status = 'hidden' AND p.status_reason = 'votes'))
             AND MBRContains(${GEOM}, p.location)
             AND ST_Distance_Sphere(p.location, ${GEOM}) <= ?
           ORDER BY ST_Distance_Sphere(p.location, ${GEOM})
@@ -324,9 +359,29 @@ export async function updatePoint(
     const row = await getRow(conn, id, user.id, true);
     if (!row || row.status === 'removed') throw notFound('This point no longer exists.');
     if (row.created_by !== user.id) {
+      if (!isVisible(row, user.id)) throw notFound('This point no longer exists.');
       throw forbidden('not_owner', 'Only the driver who added this point can change it.');
     }
-    await updateColumns(conn, id, pointColumns(input));
+    const cols = pointColumns(input);
+    // Other drivers rely on a point they confirmed: it can't be taken away
+    // by making it private or moving it far.
+    const others = await othersConfirmed(conn, id, user.id);
+    if (others > 0 && row.visibility === 'public') {
+      if (input.visibility === 'private') {
+        throw badRequest('confirmed_by_others', 'Other drivers confirmed this point, so it stays shared.');
+      }
+      if (input.lat !== undefined || input.lng !== undefined) {
+        const moved = distanceMeters(row.lat, row.lng, input.lat ?? row.lat, input.lng ?? row.lng);
+        if (moved > RULES.maxOwnerMoveM) {
+          throw badRequest(
+            'confirmed_by_others',
+            `Other drivers confirmed this point, so it can only be moved up to ${RULES.maxOwnerMoveM} m.`,
+          );
+        }
+      }
+    }
+    if (input.visibility === 'private' && row.visibility === 'public') cols.unshared_at = new Date();
+    await updateColumns(conn, id, cols);
     return toApiPoint((await getRow(conn, id, user.id))!, user.id);
   });
 }
@@ -348,14 +403,11 @@ export async function deletePoint(
     if (row.created_by !== user.id) {
       // Deleted before and kept by the community: repeat the same answer.
       if (row.created_by == null && row.my_vote === 'gone') return { removed: false, kept: true };
+      if (!isVisible(row, user.id)) throw notFound('This point no longer exists.');
       throw forbidden('not_owner', 'Only the driver who added this point can delete it.');
     }
-    const others = await selectOne<{ n: number }>(
-      conn,
-      "SELECT COUNT(*) AS n FROM point_votes WHERE point_id = ? AND vote = 'confirm' AND user_id <> ?",
-      [id, user.id],
-    );
-    if (row.visibility === 'private' || (others?.n ?? 0) === 0) {
+    const others = await othersConfirmed(conn, id, user.id);
+    if (row.visibility === 'private' || others === 0) {
       await updateColumns(conn, id, { status: 'removed', status_reason: 'owner' });
       return { removed: true, kept: false };
     }
@@ -366,15 +418,26 @@ export async function deletePoint(
   });
 }
 
+async function othersConfirmed(conn: Queryable, id: number, ownerId: number): Promise<number> {
+  const r = await selectOne<{ n: number }>(
+    conn,
+    "SELECT COUNT(*) AS n FROM point_votes WHERE point_id = ? AND vote = 'confirm' AND user_id <> ?",
+    [id, ownerId],
+  );
+  return r?.n ?? 0;
+}
+
 // ---- Votes and reports ---------------------------------------------------
 
+/** A point drivers can vote on: shown on the map, or hidden only by votes
+ * (so confirmations can bring it back). */
 async function mustSeeForCommunity(conn: Queryable, id: number, user: AuthUser): Promise<PointRow> {
   const row = await getRow(conn, id, user.id, true);
-  if (
-    !row ||
-    row.status === 'removed' ||
-    (row.visibility === 'private' && row.created_by !== user.id)
-  ) {
+  const votable =
+    row != null &&
+    (row.visibility === 'public' || row.created_by === user.id) &&
+    (row.status === 'active' || (row.status === 'hidden' && row.status_reason === 'votes'));
+  if (!row || !votable) {
     throw notFound('This point no longer exists.');
   }
   if (row.created_by === user.id) {
@@ -459,28 +522,31 @@ export async function nearby(
   const where = [`MBRContains(${GEOM}, p.location)`, `ST_Distance_Sphere(p.location, ${GEOM}) <= ?`];
   const params: unknown[] = [user.id, boxWkt(q.lat, q.lng, radius), center, radius];
   if (q.since) {
-    where.push('p.updated_at > ?');
-    params.push(new Date(q.since.getTime() - RULES.syncOverlapS * 1000));
+    const since = new Date(q.since.getTime() - RULES.syncOverlapS * 1000);
+    // Other drivers' private points are never sent, not even their ids,
+    // except ones made private since (phones that saw them must remove them).
+    where.push('p.updated_at > ?', "(p.visibility = 'public' OR p.created_by = ? OR p.unshared_at > ?)");
+    params.push(since, user.id, since);
   } else {
     where.push("p.status = 'active'", "(p.visibility = 'public' OR p.created_by = ?)");
     params.push(user.id);
   }
-  const rows = await select<PointRow>(db, `${selectPoints(where.join(' AND '))} LIMIT ?`, [
+  const order = q.since ? ' ORDER BY p.updated_at, p.id' : '';
+  const rows = await select<PointRow>(db, `${selectPoints(where.join(' AND '))}${order} LIMIT ?`, [
     ...params,
     RULES.maxResults,
   ]);
+  const truncated = rows.length >= RULES.maxResults;
   const points: ApiPoint[] = [];
   const removed: string[] = [];
   for (const row of rows) {
     if (isVisible(row, user.id)) points.push(toApiPoint(row, user.id));
     else removed.push(String(row.id));
   }
-  return {
-    points,
-    removed,
-    serverTime: now.toISOString(),
-    truncated: rows.length >= RULES.maxResults,
-  };
+  // When a delta was cut short, continue from the last change sent.
+  const last = rows[rows.length - 1];
+  const cursor = truncated && q.since && last ? last.updated_at : now;
+  return { points, removed, serverTime: cursor.toISOString(), truncated };
 }
 
 /** Everything the user added (for restoring on a new phone). */

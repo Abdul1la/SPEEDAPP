@@ -181,15 +181,27 @@ class SpeedPoint {
   );
 
   /// The fields the server stores (for uploading).
-  Map<String, dynamic> toServerJson() => {
-    'type': type.key,
-    'lat': double.parse(lat.toStringAsFixed(6)),
-    'lng': double.parse(lng.toStringAsFixed(6)),
-    'speedLimit': speedLimit,
-    'direction': direction,
-    'note': note,
-    'visibility': shared ? 'public' : 'private',
-  };
+  /// The fields the server stores, in the form it stores them (whole
+  /// degrees, a valid limit, a note of at most 200 characters), so the
+  /// server never refuses a point and copies compare equal.
+  Map<String, dynamic> toServerJson() {
+    final limit = speedLimit;
+    final dir = direction;
+    final text = note?.trim();
+    return {
+      'type': type.key,
+      'lat': double.parse(lat.clamp(-90.0, 90.0).toStringAsFixed(6)),
+      'lng': double.parse(lng.clamp(-180.0, 180.0).toStringAsFixed(6)),
+      'speedLimit': limit != null && limit >= 5 && limit <= 300 ? limit : null,
+      'direction': dir == null || !dir.isFinite ? null : dir.round() % 360,
+      'note': text == null || text.isEmpty
+          ? null
+          : text.length > maxNoteLength
+          ? text.substring(0, maxNoteLength)
+          : text,
+      'visibility': shared ? 'public' : 'private',
+    };
+  }
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -236,6 +248,9 @@ class SpeedPoint {
     );
   }
 }
+
+/// Longest note the server keeps.
+const int maxNoteLength = 200;
 
 int _idCounter = 0;
 

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/custom_sound.dart';
+import '../models/warning_tone.dart';
 import '../services/sound_library.dart';
 import '../services/sound_resolver.dart';
 import '../theme/app_theme.dart';
@@ -22,20 +23,71 @@ class ResetSound extends SoundChoice {
   const ResetSound();
 }
 
+/// A built-in sound was chosen ([tone] null: the phone voice only).
+class ChosenTone extends SoundChoice {
+  const ChosenTone(this.tone);
+  final WarningTone? tone;
+}
+
+/// The built-in sounds offered by [chooseSound].
+class ToneOptions {
+  const ToneOptions({
+    required this.selected,
+    required this.voiceSelected,
+    required this.defaultTone,
+    required this.onPlay,
+  });
+
+  /// The tone with the check mark (null: none of them).
+  final WarningTone? selected;
+
+  /// "Phone voice only" has the check mark.
+  final bool voiceSelected;
+
+  /// Marked "default" in the list.
+  final WarningTone defaultTone;
+
+  /// Plays a tone without closing the sheet.
+  final void Function(WarningTone tone) onPlay;
+}
+
+IconData _toneIcon(WarningTone t) => switch (t) {
+  WarningTone.chime => Icons.notifications_rounded,
+  WarningTone.alert => Icons.warning_amber_rounded,
+  WarningTone.radar => Icons.radar_rounded,
+  WarningTone.ding => Icons.notifications_none_rounded,
+  WarningTone.bump => Icons.waves_rounded,
+  WarningTone.doubleBeep => Icons.graphic_eq_rounded,
+};
+
 /// Asks where to get the sound from, opens the phone's picker and copies
 /// the file. Returns null if the user cancelled or the file couldn't be
 /// used (the reason is shown to the user). With [resetLabel], the sheet
-/// also offers going back to the default sound.
+/// also offers going back to the default sound. With [tones], it starts
+/// with the built-in sounds (returned as [ChosenTone]).
 Future<SoundChoice?> chooseSound(
   BuildContext context, {
   required SoundLibrary library,
   required String title,
   String? resetLabel,
+  ToneOptions? tones,
 }) async {
   final picked = await showAppSheet<Object>(
     context: context,
+    isScrollControlled: tones != null,
     builder: (ctx) {
       final p = ctx.palette;
+      Widget label(String text) => Padding(
+        padding: const EdgeInsets.fromLTRB(Space.lg, Space.lg, 0, Space.sm),
+        child: Text(
+          text,
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+            color: p.textSecondary,
+          ),
+        ),
+      );
       return SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(
           Space.xl,
@@ -49,10 +101,44 @@ Future<SoundChoice?> chooseSound(
           children: [
             SheetHeader(
               title: title,
-              subtitle: 'Any audio file, or a video (only its sound plays)',
+              subtitle: tones != null
+                  ? 'A built-in sound, any audio file, or a video'
+                  : 'Any audio file, or a video (only its sound plays)',
               onClose: () => Navigator.pop(ctx),
             ),
-            const SizedBox(height: Space.lg),
+            if (tones != null) ...[
+              label('Built-in sounds'),
+              AppCard(
+                child: Column(
+                  children: [
+                    for (final t in WarningTone.values) ...[
+                      if (t != WarningTone.values.first)
+                        const Divider(indent: 60),
+                      _ToneOption(
+                        icon: _toneIcon(t),
+                        title: t.label,
+                        subtitle: t == tones.defaultTone
+                            ? '${t.description} · default'
+                            : t.description,
+                        selected: tones.selected == t,
+                        onPlay: () => tones.onPlay(t),
+                        onTap: () => Navigator.pop(ctx, ChosenTone(t)),
+                      ),
+                    ],
+                    const Divider(indent: 60),
+                    _ToneOption(
+                      icon: Icons.record_voice_over_rounded,
+                      title: 'Phone voice only',
+                      subtitle: 'Says the distance, no sound before it',
+                      selected: tones.voiceSelected,
+                      onTap: () => Navigator.pop(ctx, const ChosenTone(null)),
+                    ),
+                  ],
+                ),
+              ),
+              label('From your phone'),
+            ] else
+              const SizedBox(height: Space.lg),
             AppCard(
               child: Column(
                 children: [
@@ -88,7 +174,7 @@ Future<SoundChoice?> chooseSound(
       );
     },
   );
-  if (picked is ResetSound) return picked;
+  if (picked is ResetSound || picked is ChosenTone) return picked as SoundChoice;
   if (picked is! SoundPickSource || !context.mounted) return null;
 
   final navigator = Navigator.of(context);
@@ -210,6 +296,83 @@ class _SourceOption extends StatelessWidget {
   }
 }
 
+/// One built-in sound in [chooseSound]: tap to choose it, play to hear it.
+class _ToneOption extends StatelessWidget {
+  const _ToneOption({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.selected,
+    required this.onTap,
+    this.onPlay,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final bool selected;
+  final VoidCallback onTap;
+  final VoidCallback? onPlay;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return Semantics(
+      selected: selected,
+      button: true,
+      child: InkWell(
+        onTap: onTap,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 56),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: Space.lg,
+              vertical: Space.sm,
+            ),
+            child: Row(
+              children: [
+                IconTile(color: p.primary, soft: true, icon: icon),
+                const SizedBox(width: Space.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                          color: p.text,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: TextStyle(fontSize: 13, color: p.textSecondary),
+                      ),
+                    ],
+                  ),
+                ),
+                if (onPlay != null) ...[
+                  const SizedBox(width: Space.sm),
+                  PlayButton(onTap: onPlay!),
+                ],
+                const SizedBox(width: Space.sm),
+                Icon(
+                  selected
+                      ? Icons.check_circle_rounded
+                      : Icons.circle_outlined,
+                  color: selected ? p.primary : p.textTertiary,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// "my_clip.mp4 · 0:03 · video sound".
 String describeCustomSound(CustomSound s) => [
   s.name,
@@ -223,8 +386,17 @@ String describeCustomSound(CustomSound s) => [
 String describeResolved(ResolvedSound r) => switch (r.origin) {
   SoundOrigin.point || SoundOrigin.custom => describeCustomSound(r.custom!),
   SoundOrigin.builtIn => 'Built-in recording',
+  SoundOrigin.tone => r.tone!.label,
   SoundOrigin.phoneVoice => 'Phone voice',
 };
+
+/// "Chime + voice", "Chime", or "Phone voice" (for [tone] null).
+String describeTone(WarningTone? tone, {required bool speakDistance}) =>
+    tone == null
+    ? 'Phone voice'
+    : speakDistance
+    ? '${tone.label} + voice'
+    : tone.label;
 
 /// Round play button.
 class PlayButton extends StatelessWidget {

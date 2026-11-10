@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:new_project/models/custom_sound.dart';
 import 'package:new_project/models/speed_point.dart';
+import 'package:new_project/models/warning_tone.dart';
 import 'package:new_project/services/sound_resolver.dart';
 
 const mine = CustomSound(file: 'a.mp3', name: 'My camera.mp3');
@@ -13,12 +14,14 @@ ResolvedSound resolve({
   Map<String, CustomSound> user = const {},
   Set<String> files = const {'a.mp3', 'b.mp4', 'c.m4a'},
   Set<String> assets = const {},
+  WarningTone? tone,
 }) => resolveSound(
   slots: slots,
   own: own,
   userSounds: user,
   fileExists: (s) => files.contains(s.file),
   assetFor: (slot) => assets.contains(slot) ? 'assets/sounds/$slot.mp3' : null,
+  tone: tone,
 );
 
 void main() {
@@ -33,6 +36,30 @@ void main() {
 
   test('phone voice when nothing is set', () {
     expect(resolve().origin, SoundOrigin.phoneVoice);
+  });
+
+  test('the built-in sound from Settings when nothing else is set', () {
+    final r = resolve(tone: WarningTone.chime);
+    expect(r.origin, SoundOrigin.tone);
+    expect(r.tone, WarningTone.chime);
+    expect(r.asset, 'assets/sounds/tones/chime.wav');
+  });
+
+  test('your files and built-in recordings win over the built-in sound', () {
+    expect(
+      resolve(user: {'camera': mine}, tone: WarningTone.chime).origin,
+      SoundOrigin.custom,
+    );
+    expect(
+      resolve(assets: {'camera'}, tone: WarningTone.chime).origin,
+      SoundOrigin.builtIn,
+    );
+  });
+
+  test('the warning type of a slot', () {
+    expect(SoundSlot.typeOf('camera_300'), PointType.camera);
+    expect(SoundSlot.typeOf('bump'), PointType.bump);
+    expect(SoundSlot.typeOf('over_speed'), isNull);
   });
 
   test('the point\'s own sound wins over everything', () {

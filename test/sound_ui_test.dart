@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:new_project/app_controller.dart';
 import 'package:new_project/models/app_settings.dart';
 import 'package:new_project/models/speed_point.dart';
+import 'package:new_project/models/warning_tone.dart';
 import 'package:new_project/screens/settings_screen.dart';
 import 'package:new_project/services/storage.dart';
 import 'package:new_project/theme/app_theme.dart';
@@ -41,8 +42,9 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
-    // Nothing picked yet: the phone voice is used.
-    expect(find.text('Phone voice'), findsWidgets);
+    // Nothing picked yet: the built-in sounds, then the voice.
+    expect(find.text('Chime + voice'), findsOneWidget);
+    expect(find.text('Bump-bump + voice'), findsOneWidget);
 
     // Camera warning plays twice.
     final twice = find.text('2×').first;
@@ -64,6 +66,55 @@ void main() {
     }
     await tester.scrollUntilVisible(find.text('"Slow down"'), 300);
     await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Settings: choose a built-in sound, voice only, voice off', (
+    tester,
+  ) async {
+    _phone(tester, const Size(390, 844));
+    final storage = _MemoryStorage();
+    final app = AppController(storage: storage);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(),
+        home: SettingsScreen(app: app),
+      ),
+    );
+    await tester.scrollUntilVisible(find.text('Chime + voice'), 300);
+    await tester.pumpAndSettle();
+
+    // Cameras: pick "Alert" from the built-in sounds.
+    await tester.tap(find.text('Chime + voice'));
+    await tester.pumpAndSettle();
+    expect(find.text('Built-in sounds'), findsOneWidget);
+    expect(find.text('Two rising bells · default'), findsOneWidget);
+    expect(find.text('From your phone'), findsOneWidget);
+    await tester.tap(find.text('Alert'));
+    await tester.pumpAndSettle();
+    expect(app.settings.toneFor(PointType.camera), WarningTone.alert);
+    expect(storage.settings?.toneFor(PointType.camera), WarningTone.alert);
+    expect(find.text('Alert + voice'), findsOneWidget);
+
+    // Bumps: the phone voice only.
+    await tester.ensureVisible(find.text('Bump-bump + voice'));
+    await tester.tap(find.text('Bump-bump + voice'));
+    await tester.pumpAndSettle();
+    final voiceOnly = find.text('Phone voice only');
+    await tester.ensureVisible(voiceOnly);
+    await tester.pumpAndSettle();
+    await tester.tap(voiceOnly);
+    await tester.pumpAndSettle();
+    expect(app.settings.toneFor(PointType.bump), isNull);
+
+    // No voice after the sound.
+    final speak = find.text('Say the distance too');
+    await tester.ensureVisible(speak);
+    await tester.pumpAndSettle();
+    await tester.tap(speak);
+    await tester.pumpAndSettle();
+    expect(app.settings.speakDistance, isFalse);
+    expect(find.text('Alert'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

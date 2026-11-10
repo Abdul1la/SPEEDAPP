@@ -24,7 +24,7 @@ export async function runMigrations(
   try {
     await conn.query("SET time_zone = '+00:00'");
     const [lock] = await conn.query<RowDataPacket[]>(
-      "SELECT GET_LOCK('speedalert_migrations', 60) AS ok",
+      "SELECT GET_LOCK('speedalert_migrations', 300) AS ok",
     );
     if (lock[0]?.ok !== 1) throw new Error('Could not get the migration lock');
 

@@ -55,6 +55,7 @@ async function mustGetUser(db: Queryable, id: number): Promise<UserRow> {
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const STAFF_SESSION_DAYS = 30;
 
 function cleanEmail(email: string): string {
   const e = email.trim().toLowerCase();
@@ -144,11 +145,13 @@ export async function login(
   sessionDays: number | null = null,
 ): Promise<Signed & { merged: number }> {
   const email = input.email.trim().toLowerCase();
-  const row = await selectOne<{ id: number; password_hash: string | null; status: string; ban_reason: string | null }>(
-    db,
-    'SELECT id, password_hash, status, ban_reason FROM users WHERE email = ?',
-    [email],
-  );
+  const row = await selectOne<{
+    id: number;
+    password_hash: string | null;
+    status: string;
+    ban_reason: string | null;
+    role: Role;
+  }>(db, 'SELECT id, password_hash, status, ban_reason, role FROM users WHERE email = ?', [email]);
   const ok = await verifyPassword(input.password, row?.password_hash ?? dummyPasswordHash);
   if (!row || !ok) {
     throw new ApiError(401, 'invalid_login', 'Wrong email or password.');
@@ -161,16 +164,32 @@ export async function login(
     if (current?.isAnonymous && current.id !== row.id) {
       merged = await mergeInto(conn, current.id, row.id);
     }
-    const token = await createSession(conn, row.id, input.deviceName ?? null, sessionDays);
+    // Staff sign-ins (moderation rights) always expire, at most after 30 days.
+    const days = row.role === 'user' ? sessionDays : Math.min(sessionDays ?? STAFF_SESSION_DAYS, STAFF_SESSION_DAYS);
+    const token = await createSession(conn, row.id, input.deviceName ?? null, days);
     return { token, user: toApiUser(await mustGetUser(conn, row.id)), merged };
   });
 }
 
 /** Moves everything of user [from] to user [to], then deletes [from]. */
 async function mergeInto(conn: Queryable, from: number, to: number): Promise<number> {
-  const moved = await execute(conn, 'UPDATE IGNORE points SET created_by = ? WHERE created_by = ?', [to, from]);
+  // The same point uploaded to both accounts (same phone id): keep the
+  // account's copy, so nothing is left without an owner.
+  await execute(
+    conn,
+    `DELETE a FROM points a
+       JOIN points t ON t.created_by = ? AND t.client_id = a.client_id
+      WHERE a.created_by = ? AND a.client_id IS NOT NULL`,
+    [to, from],
+  );
+  const moved = await execute(conn, 'UPDATE points SET created_by = ? WHERE created_by = ?', [to, from]);
+  const touched = await select<{ point_id: number }>(
+    conn,
+    `SELECT point_id FROM point_votes WHERE user_id IN (?, ?)
+      UNION SELECT point_id FROM point_reports WHERE user_id IN (?, ?)`,
+    [from, to, from, to],
+  );
   // Votes on points the account owns or already voted on are dropped.
-  const voted = await select<{ point_id: number }>(conn, 'SELECT point_id FROM point_votes WHERE user_id = ?', [from]);
   await execute(conn, 'UPDATE IGNORE point_votes SET user_id = ? WHERE user_id = ?', [to, from]);
   await execute(
     conn,
@@ -179,6 +198,22 @@ async function mergeInto(conn: Queryable, from: number, to: number): Promise<num
     [to, to],
   );
   await execute(conn, 'UPDATE point_reports SET user_id = ? WHERE user_id = ?', [to, from]);
+  // No reports on your own points, and one open report per point.
+  await execute(
+    conn,
+    `UPDATE point_reports r JOIN points p ON p.id = r.point_id
+        SET r.status = 'dismissed', r.resolution_note = 'Reporter owns the point'
+      WHERE r.user_id = ? AND p.created_by = ? AND r.status = 'open'`,
+    [to, to],
+  );
+  await execute(
+    conn,
+    `UPDATE point_reports r1 JOIN point_reports r2
+         ON r2.point_id = r1.point_id AND r2.user_id = r1.user_id AND r2.status = 'open' AND r2.id < r1.id
+        SET r1.status = 'dismissed', r1.resolution_note = 'Duplicate report'
+      WHERE r1.user_id = ? AND r1.status = 'open'`,
+    [to],
+  );
   await execute(
     conn,
     `INSERT IGNORE INTO user_settings (user_id, settings)
@@ -186,7 +221,7 @@ async function mergeInto(conn: Queryable, from: number, to: number): Promise<num
     [to, from],
   );
   await execute(conn, 'DELETE FROM users WHERE id = ?', [from]);
-  await recountPoints(conn, voted.map((v) => v.point_id));
+  await recountPoints(conn, touched.map((v) => v.point_id));
   return moved.affectedRows;
 }
 
@@ -261,12 +296,20 @@ export async function saveSettings(
   if (Buffer.byteLength(json) > MAX_SETTINGS_BYTES) {
     throw badRequest('too_large', 'Settings are too large.');
   }
-  await execute(
-    db,
-    `INSERT INTO user_settings (user_id, settings) VALUES (?, CAST(? AS JSON)) AS new
-     ON DUPLICATE KEY UPDATE settings = new.settings`,
-    [user.id, json],
-  );
+  try {
+    await execute(
+      db,
+      `INSERT INTO user_settings (user_id, settings) VALUES (?, CAST(? AS JSON)) AS new
+       ON DUPLICATE KEY UPDATE settings = new.settings`,
+      [user.id, json],
+    );
+  } catch (e) {
+    const code = (e as { code?: string }).code ?? '';
+    if (code.startsWith('ER_JSON') || code.startsWith('ER_INVALID_JSON')) {
+      throw badRequest('invalid_settings', 'These settings could not be saved.');
+    }
+    throw e;
+  }
   const row = await selectOne<{ updated_at: Date }>(db, 'SELECT updated_at FROM user_settings WHERE user_id = ?', [user.id]);
   return { updatedAt: (row?.updated_at ?? new Date()).toISOString() };
 }

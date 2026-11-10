@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'app_controller.dart';
 import 'map/map_styles.dart';
@@ -7,6 +8,9 @@ import 'theme/app_theme.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // The driving screen is laid out for a phone held upright (or mounted
+  // upright in the car).
+  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   final app = AppController();
   runApp(SpeedAlertApp(app: app));
   app.init();
@@ -56,6 +60,12 @@ class _SpeedAlertAppState extends State<SpeedAlertApp> {
         theme: buildAppTheme(Brightness.light),
         darkTheme: buildAppTheme(Brightness.dark),
         home: _home,
+        // Very large system text would overflow the fixed-size driving
+        // panels; above 1.3x the app stays at 1.3x.
+        builder: (context, child) => MediaQuery.withClampedTextScaling(
+          maxScaleFactor: 1.3,
+          child: child!,
+        ),
       ),
     );
   }

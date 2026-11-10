@@ -8,6 +8,7 @@ import 'package:flutter_tts/flutter_tts.dart';
 import '../models/app_settings.dart';
 import '../models/custom_sound.dart';
 import '../models/speed_point.dart';
+import '../models/warning_tone.dart';
 import 'alert_engine.dart';
 import 'sound_library.dart';
 import 'sound_resolver.dart';
@@ -21,13 +22,17 @@ import 'sound_resolver.dart';
 ///       camera_500.mp3, camera_300.mp3, ... bump_300.mp3, bump_100.mp3
 ///       camera.mp3 / bump.mp3  (used for any distance without its own file)
 ///       over_speed.mp3
-///  4. the phone's text-to-speech voice.
+///  4. for cameras and bumps, the built-in sound chosen in Settings
+///     (`assets/sounds/tones/`, see [WarningTone]), followed by the voice
+///     saying the distance when "Say the distance too" is on,
+///  5. the phone's text-to-speech voice.
 /// Each warning plays as many times as set in Settings (or on the point).
 class VoicePlayer {
   static const _dir = 'assets/sounds/';
   static const _extensions = ['mp3', 'm4a', 'wav', 'ogg', 'aac'];
   static const _gapBetweenRepeats = Duration(milliseconds: 450);
   static const _previewId = 'preview';
+  static const _maxSpeech = Duration(seconds: 12);
 
   late final AudioPlayer _player = AudioPlayer(playerId: 'warnings');
   late final FlutterTts _tts = FlutterTts();
@@ -102,7 +107,9 @@ class VoicePlayer {
   List<String> get recordedFiles =>
       (_assets
               .where((a) => _extensions.any((e) => a.endsWith('.$e')))
-              .map((a) => a.substring(_dir.length)))
+              .map((a) => a.substring(_dir.length))
+              // Built-in tones live in a sub-folder and aren't recordings.
+              .where((a) => !a.contains('/')))
           .toList()
         ..sort();
 
@@ -110,15 +117,19 @@ class VoicePlayer {
   bool hasRecording(String slot) => _findAsset(slot) != null;
 
   /// What would play for these slots (most specific first), with the
-  /// point's own sound [own] taking priority.
-  ResolvedSound resolve(List<String> slots, {CustomSound? own}) =>
-      resolveSound(
-        slots: slots,
-        own: own,
-        userSounds: settings.sounds,
-        fileExists: sounds.has,
-        assetFor: _findAsset,
-      );
+  /// point's own sound [own] taking priority. Camera and bump slots fall
+  /// back to the built-in sound chosen in Settings.
+  ResolvedSound resolve(List<String> slots, {CustomSound? own}) {
+    final type = slots.isEmpty ? null : SoundSlot.typeOf(slots.last);
+    return resolveSound(
+      slots: slots,
+      own: own,
+      userSounds: settings.sounds,
+      fileExists: sounds.has,
+      assetFor: _findAsset,
+      tone: type == null ? null : settings.toneFor(type),
+    );
+  }
 
   void announce(AlertEvent e) {
     if (muted) return;
@@ -153,6 +164,21 @@ class VoicePlayer {
           ),
         );
     }
+  }
+
+  /// Plays one built-in sound alone (the sound picker).
+  void previewTone(WarningTone tone) {
+    _queue.removeWhere((q) => q.pointId == _previewId);
+    if (_current?.pointId == _previewId) _skipCurrent();
+    _enqueue(
+      _Utterance(
+        pointId: _previewId,
+        kind: 'preview',
+        text: '',
+        repeat: 1,
+        source: AssetSource(tone.asset.substring('assets/'.length)),
+      ),
+    );
   }
 
   /// Plays one slot by name (e.g. "camera_300"), for testing in settings.
@@ -198,6 +224,7 @@ class VoicePlayer {
           : sound.asset != null
           ? AssetSource(sound.asset!.substring('assets/'.length))
           : null,
+      speakAfter: sound.origin == SoundOrigin.tone && settings.speakDistance,
       repeat: repeat.clamp(1, maxRepeat),
     );
   }
@@ -251,15 +278,13 @@ class VoicePlayer {
   }
 
   Future<void> _playOnce(_Utterance u) async {
+    final source = u.source;
+    if (source == null) return _speak(u.text);
+    var played = false;
     try {
-      final source = u.source;
-      if (source == null) {
-        await Future.any([_tts.speak(u.text), _skip.future]);
-        if (_skip.isCompleted) await _tts.stop();
-        return;
-      }
       final done = _player.onPlayerComplete.first;
       await _player.play(source);
+      played = true;
       // Long sounds (e.g. a whole video) are cut so the next warning
       // isn't held up.
       var finished = false;
@@ -270,6 +295,27 @@ class VoicePlayer {
       if (!finished) await _player.stop();
     } catch (e) {
       debugPrint('Could not play warning: $e');
+    }
+    if (_skip.isCompleted) return;
+    // After a built-in sound the voice says the distance; and if a sound
+    // couldn't play at all, the voice says the whole warning instead of
+    // leaving the driver without one.
+    if (u.speakAfter || !played) await _speak(u.text);
+  }
+
+  Future<void> _speak(String text) async {
+    if (text.isEmpty) return;
+    try {
+      // The phone's voice engine can fail without ever finishing; a time
+      // limit keeps one stuck warning from silencing all later ones.
+      var timedOut = false;
+      await Future.any([
+        _tts.speak(text),
+        _skip.future,
+      ]).timeout(_maxSpeech, onTimeout: () => timedOut = true);
+      if (_skip.isCompleted || timedOut) await _tts.stop();
+    } catch (e) {
+      debugPrint('Could not speak warning: $e');
     }
   }
 
@@ -293,14 +339,17 @@ class _Utterance {
     required this.text,
     required this.repeat,
     this.source,
+    this.speakAfter = false,
   });
 
   final String pointId;
   final String kind;
 
-  /// Spoken by the phone voice when there is no [source].
+  /// Spoken by the phone voice when there is no [source], after [source]
+  /// when [speakAfter], or when [source] can't be played.
   final String text;
   final Source? source;
+  final bool speakAfter;
   final int repeat;
 
   String get key => '$pointId#$kind';

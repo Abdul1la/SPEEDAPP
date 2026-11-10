@@ -21,6 +21,7 @@ Future<void> _open(
   LatLngPair? myLocation,
   PointPlace place = PointPlace.mapSpot,
   bool fromLongPress = true,
+  bool presetDirection = false,
 }) async {
   tester.view.physicalSize = size * 3;
   tester.view.devicePixelRatio = 3;
@@ -41,6 +42,7 @@ Future<void> _open(
               place: place,
               fromLongPress: fromLongPress,
               myCourse: 37,
+              presetDirection: presetDirection,
             ),
             child: const Text('open'),
           ),
@@ -64,6 +66,9 @@ void main() {
     await tester.pump();
     await tester.tap(find.text('30'));
     await tester.pump();
+    await tester.ensureVisible(find.text('One way'));
+    await tester.tap(find.text('One way'));
+    await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('E'));
     await tester.tap(find.text('E'));
     await tester.pumpAndSettle();
@@ -79,9 +84,22 @@ void main() {
     expect(p.direction, 90);
   });
 
-  testWidgets('"my direction" is preselected for new points', (tester) async {
-    final app = AppController(storage: _MemoryStorage());
+  testWidgets('new points start as "both ways" (parked or on the map)', (
+    tester,
+  ) async {
+    final storage = _MemoryStorage();
+    final app = AppController(storage: storage);
     await _open(tester, app);
+    expect(find.text('NE 37°'), findsNothing); // no compass
+    await tester.ensureVisible(find.text('Save'));
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(storage.saved.single.direction, isNull);
+  });
+
+  testWidgets('"my direction" is preselected while driving', (tester) async {
+    final app = AppController(storage: _MemoryStorage());
+    await _open(tester, app, presetDirection: true);
     expect(find.text('NE 37°'), findsOneWidget); // compass center
     expect(find.text('My direction · NE'), findsOneWidget);
   });
@@ -91,7 +109,7 @@ void main() {
   ) async {
     final storage = _MemoryStorage();
     final app = AppController(storage: storage);
-    await _open(tester, app);
+    await _open(tester, app, presetDirection: true);
     expect(find.text('NE 37°'), findsOneWidget);
 
     await tester.tap(find.text('Both ways'));
@@ -142,7 +160,7 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('My location'), findsOneWidget);
     expect(find.text('Map center'), findsOneWidget);
-    expect(find.text('Your GPS position right now.'), findsOneWidget);
+    expect(find.text('Your GPS position.'), findsOneWidget);
     expect(find.textContaining('33.31000, 44.36000'), findsOneWidget);
 
     await tester.ensureVisible(find.text('Save'));
