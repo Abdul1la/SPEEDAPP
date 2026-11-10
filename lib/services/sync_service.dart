@@ -153,6 +153,13 @@ class SyncService extends ChangeNotifier {
     _soon = Timer(_debounce, () => unawaited(syncNow(pull: false)));
   }
 
+  /// Makes sure this phone has an account on the server (for search and
+  /// directions, which need one). Fast when it already has one.
+  Future<void> ensureAccount() async {
+    if (_token != null || !_started) return;
+    await _locked(_ensureAccount);
+  }
+
   /// Undo of a delete: true if it hadn't reached the server yet.
   bool cancelDelete(String remoteId) {
     final was = _pendingDeletes.remove(remoteId);

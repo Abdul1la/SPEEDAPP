@@ -25,6 +25,8 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     maxPointsPerDay: 100,
     migrateOnStart: false,
     rateLimit: false,
+    photonUrl: 'http://127.0.0.1:9',
+    osrmUrl: 'http://127.0.0.1:9',
     ...overrides,
   };
 }
