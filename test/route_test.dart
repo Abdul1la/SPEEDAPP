@@ -366,7 +366,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400)); // debounce
     await tester.pumpAndSettle();
     expect(find.text('Duhok'), findsOneWidget);
-    expect(find.text('Duhok, Iraq'), findsOneWidget);
+    // What it is, then where: "City · Duhok, Iraq".
+    expect(find.textContaining('Duhok, Iraq'), findsOneWidget);
 
     await tester.tap(find.text('Duhok'));
     await tester.pumpAndSettle();
@@ -406,7 +407,7 @@ void main() {
     await tester.runAsync(() => Future<void>.delayed(Duration.zero));
     await tester.pumpAndSettle();
     expect(find.text('Lelav City'), findsOneWidget);
-    expect(find.text('Nzarke, Duhok, Iraq'), findsOneWidget);
+    expect(find.textContaining('Nzarke, Duhok, Iraq'), findsOneWidget);
     expect(find.text('4.2 km'), findsOneWidget); // from the search service
     expect(find.text('Google Maps'), findsOneWidget); // its credit
 

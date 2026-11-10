@@ -297,7 +297,9 @@ function photonPlaces(features: PhotonFeature[]): PhotonPlace[] {
     const street = [p.street, p.housenumber].filter(Boolean).join(' ');
     const name = String(p.name ?? street).trim();
     if (!name) continue;
-    const parts = [street, p.district, p.city, p.county, p.state, p.country]
+    // Street, quarter, city, province: not the district ("Duhok District"
+    // repeats the city) or the country (search is Iraq only).
+    const parts = [street, p.district, p.city, p.state]
       .map((v) => (v == null ? '' : String(v).trim()))
       .filter((v, i, all) => v && v !== name && all.indexOf(v) === i);
     places.push({
