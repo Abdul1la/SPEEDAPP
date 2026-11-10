@@ -41,7 +41,9 @@ class Account {
 /// there is a connection.
 ///  * My points: uploaded (created / changed / deleted), restored on sign-in.
 ///  * Community points: downloaded around the driver (30 km), then only
-///    changes ("since"), and kept for offline use.
+///    changes ("since"), and kept for offline use. Places the user looks
+///    at on the map are downloaded too ([browse]), so cameras show in every
+///    city, not only near the driver.
 ///  * Settings: backed up to the account (not the sound files).
 class SyncService extends ChangeNotifier {
   SyncService({required this.api, required this.storage, required this.host});
@@ -51,6 +53,15 @@ class SyncService extends ChangeNotifier {
   final SyncHost host;
 
   static const areaRadiusKm = 30.0;
+
+  /// Most the server sends around one place (its limit is 100 km).
+  static const maxBrowseRadiusKm = 100.0;
+
+  /// A place looked at on the map isn't downloaded again for this long.
+  static const browseFreshFor = Duration(minutes: 10);
+
+  /// Most community points kept on the phone (the farthest go first).
+  static const maxCachedPoints = 20000;
 
   /// Download the area again when the driver is this far from its center.
   static const refetchDistanceM = 10000.0;
@@ -78,6 +89,10 @@ class SyncService extends ChangeNotifier {
   bool _again = false;
   String? _error;
   DateTime? _lastFailure;
+
+  /// Places downloaded by [browse] recently (not saved).
+  final List<({double lat, double lng, double radiusM, DateTime at})>
+  _browsed = [];
   Timer? _timer;
   Timer? _soon;
 
@@ -492,7 +507,9 @@ class SyncService extends ChangeNotifier {
     await _applyArea(
       (res['points'] as List).cast<Map<String, dynamic>>(),
       (res['removed'] as List).cast<String>(),
-      replace: full,
+      replaceWithin: full
+          ? (lat: pos.lat, lng: pos.lng, radiusM: areaRadiusKm * 1000)
+          : null,
     );
     _cursor = res['serverTime'] as String;
     if (full) {
@@ -502,18 +519,78 @@ class SyncService extends ChangeNotifier {
     }
   }
 
+  /// The map shows a place (the user moved or zoomed it): downloads the
+  /// cameras and bumps there, so they show wherever the user looks, not
+  /// only around the driver. [radiusKm] is how far the map shows from
+  /// [lat], [lng]; at least [areaRadiusKm] and at most [maxBrowseRadiusKm]
+  /// are downloaded, so moving around one city needs one download.
+  /// Places downloaded recently (and the driver's area, which the regular
+  /// sync keeps up to date) are skipped. Problems are only logged: the
+  /// regular sync reports connection errors.
+  Future<void> browse(double lat, double lng, double radiusKm) async {
+    if (!_started || _token == null) return;
+    final seenM = radiusKm.clamp(0.1, maxBrowseRadiusKm) * 1000;
+    if (_covered(lat, lng, seenM)) return;
+    await _locked(() async {
+      // Downloaded while this was waiting for the lock?
+      if (_token == null || _covered(lat, lng, seenM)) return;
+      final radiusM = seenM < areaRadiusKm * 1000 ? areaRadiusKm * 1000 : seenM;
+      try {
+        final res = await api.nearby(lat, lng, radiusM / 1000);
+        await _applyArea(
+          (res['points'] as List).cast<Map<String, dynamic>>(),
+          const [],
+          replaceWithin: (lat: lat, lng: lng, radiusM: radiusM),
+        );
+        _browsed.add((
+          lat: lat,
+          lng: lng,
+          radiusM: radiusM,
+          at: DateTime.now(),
+        ));
+      } catch (e) {
+        debugPrint('Could not load the points of this place: $e');
+      }
+    });
+  }
+
+  /// True if the circle [radiusM] around [lat], [lng] is already on the
+  /// phone: inside the driver's area or a recently browsed place.
+  bool _covered(double lat, double lng, double radiusM) {
+    bool inside(double cLat, double cLng, double cRadiusM) =>
+        distanceMeters(cLat, cLng, lat, lng) + radiusM <= cRadiusM;
+    final now = DateTime.now();
+    _browsed.removeWhere((a) => now.difference(a.at) > browseFreshFor);
+    final cLat = _centerLat;
+    final cLng = _centerLng;
+    if (cLat != null && cLng != null && inside(cLat, cLng, areaRadiusKm * 1000)) {
+      return true;
+    }
+    return _browsed.any((a) => inside(a.lat, a.lng, a.radiusM));
+  }
+
   /// Merges downloaded points: community ones into the cache; my own ones
   /// (e.g. added on my other phone) into my list unless changed here.
+  /// With [replaceWithin] (a full download of that circle), cached
+  /// community points inside it that weren't sent are gone; points outside
+  /// it (other places looked at on the map) are kept.
   Future<void> _applyArea(
     List<Map<String, dynamic>> points,
     List<String> removed, {
-    required bool replace,
+    ({double lat, double lng, double radiusM})? replaceWithin,
   }) async {
     final oldCommunity = {
       for (final c in host.communityPoints)
         if (c.remoteId != null) c.remoteId!: c,
     };
-    final community = replace ? <String, SpeedPoint>{} : {...oldCommunity};
+    final community = {...oldCommunity};
+    if (replaceWithin case (:final lat, :final lng, :final radiusM)) {
+      // A little inside the edge, where the server's and the phone's
+      // distance math can differ by a few meters.
+      community.removeWhere(
+        (_, c) => distanceMeters(lat, lng, c.lat, c.lng) < radiusM * 0.999,
+      );
+    }
     final mine = <String, SpeedPoint>{for (final p in host.myPoints) p.id: p};
     final mineByRemote = {
       for (final p in mine.values)
@@ -561,7 +638,15 @@ class SyncService extends ChangeNotifier {
       }
     }
     if (mineChanged) await host.setMyPoints(mine.values.toList());
-    await host.setCommunity(community.values.toList());
+    var kept = community.values.toList();
+    final pos = host.syncPosition;
+    if (kept.length > maxCachedPoints && pos != null) {
+      // Too many places looked at: keep the ones nearest the driver.
+      double d(SpeedPoint p) => distanceMeters(pos.lat, pos.lng, p.lat, p.lng);
+      kept.sort((a, b) => d(a).compareTo(d(b)));
+      kept = kept.sublist(0, maxCachedPoints);
+    }
+    await host.setCommunity(kept);
   }
 
   // ---- Account ----

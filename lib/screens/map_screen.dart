@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/gestures.dart' show kTouchSlop;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,13 +9,17 @@ import '../app_controller.dart';
 import '../map/map_styles.dart';
 import '../map/marker_icons.dart';
 import '../models/app_settings.dart';
+import '../models/route_plan.dart';
 import '../models/speed_point.dart';
+import '../services/api_client.dart';
 import '../services/location_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/geo.dart';
 import '../widgets/hud.dart';
 import '../widgets/point_editor.dart';
+import '../widgets/route_sheet.dart';
 import '../widgets/ui.dart';
+import 'search_screen.dart';
 import 'settings_screen.dart';
 
 /// Main screen: a full-screen map with floating frosted controls.
@@ -58,12 +64,23 @@ class _MapScreenState extends State<MapScreen> {
   double _bearing = 0;
   late final AppLifecycleListener _lifecycle;
 
+  /// Choosing a route: the sheet covers the bottom half of the map.
+  bool _planning = false;
+  bool _loadingRoute = false;
+  StreamSubscription<String>? _messages;
+
+  /// Route lines as map coordinates (made once per route, not every frame).
+  final Map<RouteOption, List<LatLng>> _lines = Map.identity();
+
   AppController get app => widget.app;
 
   @override
   void initState() {
     super.initState();
     app.addListener(_onAppChanged);
+    _messages = app.messages.listen((m) {
+      if (mounted) _toast(m);
+    });
     // Coming back from the phone settings: try GPS again.
     _lifecycle = AppLifecycleListener(
       onResume: () {
@@ -76,6 +93,7 @@ class _MapScreenState extends State<MapScreen> {
 
   @override
   void dispose() {
+    _messages?.cancel();
     app.removeListener(_onAppChanged);
     _lifecycle.dispose();
     super.dispose();
@@ -109,6 +127,25 @@ class _MapScreenState extends State<MapScreen> {
     setState(() => _follow = true);
     final pos = app.position;
     if (pos != null) _moveCameraTo(pos.lat, pos.lng, pos.speedKmh);
+  }
+
+  /// The user moved the map somewhere: load the cameras and bumps there
+  /// (another city, for example). While the map follows the car, the
+  /// driver's own area is already loaded.
+  Future<void> _loadVisibleArea() async {
+    final map = _map;
+    if (map == null || _follow) return;
+    try {
+      final b = await map.getVisibleRegion();
+      final lat = (b.northeast.latitude + b.southwest.latitude) / 2;
+      final lng = (b.northeast.longitude + b.southwest.longitude) / 2;
+      final km =
+          distanceMeters(lat, lng, b.northeast.latitude, b.northeast.longitude) /
+          1000;
+      unawaited(app.sync.browse(lat, lng, km));
+    } catch (_) {
+      // The map was closed meanwhile.
+    }
   }
 
   Future<void> _prepareIcons() async {
@@ -244,6 +281,95 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  // ---- Search and directions -------------------------------------------
+
+  Future<void> _openSearch() async {
+    final place = await showPlaceSearch(context, app);
+    if (place == null || !mounted) return;
+    await _planTo(place);
+  }
+
+  /// Gets the ways to drive to [place], lets the driver pick one, starts it.
+  Future<void> _planTo(Place place) async {
+    if (app.isSimulating) app.stopSimulation();
+    setState(() {
+      _loadingRoute = true;
+      _follow = false;
+    });
+    try {
+      await app.planRoute(place);
+    } on ApiException catch (e) {
+      if (mounted) {
+        setState(() => _loadingRoute = false);
+        _toast(
+          e.offline
+              ? 'No internet connection. Directions need internet.'
+              : e.message,
+        );
+      }
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _loadingRoute = false;
+      _planning = true;
+    });
+    // After the map padding for the sheet is applied.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _fitRoutes());
+    final start = await showRouteOptions(context, app);
+    if (!mounted) return;
+    setState(() => _planning = false);
+    if (start) {
+      app.startRoute();
+      _recenter();
+    } else {
+      app.endRoute();
+      _recenter();
+    }
+  }
+
+  /// Shows every route option (and where I am) on the map.
+  void _fitRoutes() {
+    final map = _map;
+    if (map == null || app.routeOptions.isEmpty) return;
+    var minLat = 90.0, maxLat = -90.0, minLng = 180.0, maxLng = -180.0;
+    void include(double lat, double lng) {
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+      if (lng < minLng) minLng = lng;
+      if (lng > maxLng) maxLng = lng;
+    }
+
+    for (final r in app.routeOptions) {
+      for (final pt in r.path) {
+        include(pt.lat, pt.lng);
+      }
+    }
+    final pos = app.position;
+    if (pos != null) include(pos.lat, pos.lng);
+    map.animateCamera(
+      CameraUpdate.newLatLngBounds(
+        LatLngBounds(
+          southwest: LatLng(minLat, minLng),
+          northeast: LatLng(maxLat, maxLng),
+        ),
+        48,
+      ),
+    );
+  }
+
+  Future<void> _reroute() async {
+    try {
+      await app.reroute();
+      _toast('New route');
+    } on ApiException catch (e) {
+      _toast(e.message);
+    }
+  }
+
+  List<LatLng> _lineFor(RouteOption r) =>
+      _lines[r] ??= [for (final pt in r.path) LatLng(pt.lat, pt.lng)];
+
   // ---- Build ------------------------------------------------------------
 
   @override
@@ -302,6 +428,41 @@ class _MapScreenState extends State<MapScreen> {
         ),
     };
 
+    final options = app.routeOptions;
+    _lines.removeWhere((r, _) => !options.contains(r));
+    final polylines = <Polyline>{
+      for (var i = 0; i < options.length; i++)
+        if (!app.routeActive || i == app.selectedRoute)
+          Polyline(
+            polylineId: PolylineId('route$i'),
+            points: _lineFor(options[i]),
+            color: i == app.selectedRoute
+                ? p.primary
+                : p.textTertiary.withValues(alpha: 0.8),
+            width: i == app.selectedRoute ? 7 : 5,
+            zIndex: i == app.selectedRoute ? 2 : 1,
+            consumeTapEvents: true,
+            onTap: () => app.selectRoute(i),
+            startCap: Cap.roundCap,
+            endCap: Cap.roundCap,
+            jointType: JointType.round,
+          ),
+    };
+    final dest = app.destination;
+    if (dest != null) {
+      markers.add(
+        Marker(
+          markerId: const MarkerId('_destination'),
+          position: LatLng(dest.lat, dest.lng),
+          icon: BitmapDescriptor.defaultMarkerWithHue(
+            BitmapDescriptor.hueAzure,
+          ),
+          infoWindow: InfoWindow(title: dest.name, snippet: dest.address),
+          zIndexInt: 5,
+        ),
+      );
+    }
+
     final circles = <Circle>{
       if (active != null)
         Circle(
@@ -337,11 +498,15 @@ class _MapScreenState extends State<MapScreen> {
         buildingsEnabled: false,
         markers: markers,
         circles: circles,
+        polylines: polylines,
         // Keep the car low on the screen to see more road ahead, and keep
         // the Google logo visible above the drive panel.
         padding: EdgeInsets.only(
           top: insets.top + 150,
-          bottom: insets.bottom + _panelHeight + Space.xl,
+          // While choosing a route the sheet covers the lower half.
+          bottom: _planning
+              ? MediaQuery.sizeOf(context).height * routeSheetHeight
+              : insets.bottom + _panelHeight + Space.xl,
         ),
         onMapCreated: (c) {
           _map = c;
@@ -349,6 +514,7 @@ class _MapScreenState extends State<MapScreen> {
           if (pt != null) _moveCameraTo(pt.lat, pt.lng, pt.speedKmh);
         },
         onCameraMove: (camera) => _mapCenter = camera.target,
+        onCameraIdle: _loadVisibleArea,
         onLongPress: (latLng) => _openEditor(at: latLng),
       ),
     );
@@ -369,21 +535,45 @@ class _MapScreenState extends State<MapScreen> {
         app.locationStatus != null &&
         app.locationStatus != LocationStatus.ok) {
       card = _LocationProblem(key: const ValueKey('loc'), app: app);
-    } else if (app.ready && app.mapPoints.isEmpty && !_hintDismissed) {
+    } else if (_loadingRoute) {
       card = _NoticeCard(
-        key: const ValueKey('hint'),
-        icon: Icons.add_location_alt_outlined,
+        key: const ValueKey('routing'),
+        icon: Icons.alt_route_rounded,
         color: p.primary,
-        title: 'Add your first point',
-        text: 'Tap Add to put one at your location, or long-press the map.',
-        action: IconButton(
-          onPressed: () => setState(() => _hintDismissed = true),
-          tooltip: 'Dismiss',
-          icon: Icon(Icons.close_rounded, color: p.textTertiary, size: 20),
-        ),
+        title: 'Finding the ways…',
+        text: 'Looking for routes and the cameras on them.',
+      );
+    } else if (app.routeActive && app.destination != null) {
+      card = _RouteBanner(
+        key: const ValueKey('route'),
+        app: app,
+        onEnd: app.endRoute,
+        onReroute: _reroute,
+      );
+    } else if (_planning) {
+      card = const SizedBox(key: ValueKey('planning'), width: double.infinity);
+    } else if (app.ready && app.mapPoints.isEmpty && !_hintDismissed) {
+      card = Column(
+        key: const ValueKey('hint'),
+        children: [
+          _SearchBar(onTap: _openSearch),
+          const SizedBox(height: Space.sm),
+          _NoticeCard(
+            icon: Icons.add_location_alt_outlined,
+            color: p.primary,
+            title: 'Add your first point',
+            text: 'Tap Add to put one at your location, or long-press the map.',
+            action: IconButton(
+              onPressed: () => setState(() => _hintDismissed = true),
+              tooltip: 'Dismiss',
+              icon: Icon(Icons.close_rounded, color: p.textTertiary, size: 20),
+            ),
+          ),
+        ],
       );
     } else {
-      card = const SizedBox(key: ValueKey('none'), width: double.infinity);
+      // Nothing to warn about: search for a place to drive to.
+      card = _SearchBar(key: const ValueKey('search'), onTap: _openSearch);
     }
 
     final Widget? status = app.isSimulating
@@ -759,6 +949,136 @@ class _LocationProblem extends StatelessWidget {
           ),
           child: Text(button),
         ),
+      ),
+    );
+  }
+}
+
+/// "Search places" pill at the top of the map.
+class _SearchBar extends StatelessWidget {
+  const _SearchBar({super.key, required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return Semantics(
+      button: true,
+      label: 'Search places',
+      child: GestureDetector(
+        onTap: onTap,
+        child: Frosted(
+          radius: 26,
+          padding: const EdgeInsets.symmetric(
+            horizontal: Space.lg,
+            vertical: 14,
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.search_rounded, color: p.textSecondary),
+              const SizedBox(width: Space.md),
+              Expanded(
+                child: Text(
+                  'Search places, e.g. Duhok',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 16, color: p.textSecondary),
+                ),
+              ),
+              Icon(Icons.alt_route_rounded, color: p.primary, size: 22),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// While driving a route: where to, how far, when I'll arrive.
+class _RouteBanner extends StatelessWidget {
+  const _RouteBanner({
+    super.key,
+    required this.app,
+    required this.onEnd,
+    required this.onReroute,
+  });
+
+  final AppController app;
+  final VoidCallback onEnd;
+  final VoidCallback onReroute;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final dest = app.destination!;
+    final left = app.remainingM;
+    final secs = app.remainingS;
+    final String sub;
+    if (app.offRoute) {
+      sub = 'You left the route';
+    } else if (left == null || secs == null) {
+      sub = dest.address;
+    } else {
+      final arrive = DateTime.now().add(Duration(seconds: secs));
+      final hh = arrive.hour.toString().padLeft(2, '0');
+      final mm = arrive.minute.toString().padLeft(2, '0');
+      sub =
+          '${formatDistance(left)} · ${formatDuration(secs)} · arrive $hh:$mm';
+    }
+    return Frosted(
+      radius: 26,
+      padding: const EdgeInsets.fromLTRB(
+        Space.md,
+        Space.md,
+        Space.sm,
+        Space.md,
+      ),
+      child: Row(
+        children: [
+          PointBadge(
+            color: app.offRoute ? p.warning : p.primary,
+            size: 44,
+            child: const Icon(
+              Icons.flag_rounded,
+              color: Colors.white,
+              size: 22,
+            ),
+          ),
+          const SizedBox(width: Space.md),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  dest.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: p.text,
+                  ),
+                ),
+                Text(
+                  sub,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: app.offRoute ? p.warning : p.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (app.offRoute)
+            TextButton(onPressed: onReroute, child: const Text('New route')),
+          IconButton(
+            tooltip: 'End route',
+            onPressed: onEnd,
+            icon: Icon(Icons.close_rounded, color: p.textTertiary, size: 20),
+          ),
+        ],
       ),
     );
   }

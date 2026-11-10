@@ -5,6 +5,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'models/app_settings.dart';
 import 'models/custom_sound.dart';
+import 'models/route_plan.dart';
 import 'models/speed_point.dart';
 import 'services/alert_engine.dart';
 import 'services/api_client.dart';
@@ -13,6 +14,7 @@ import 'services/sound_library.dart';
 import 'services/storage.dart';
 import 'services/sync_service.dart';
 import 'services/voice_player.dart';
+import 'utils/geo.dart';
 
 /// Holds the app state and connects GPS -> warning logic -> voice, and the
 /// phone -> server sync.
@@ -24,10 +26,13 @@ class AppController extends ChangeNotifier implements SyncHost {
     ApiClient? api,
   }) : _storage = storage ?? Storage(),
        _location = location ?? LocationService(),
-       voice = voice ?? VoicePlayer() {
-    sync = SyncService(api: api ?? ApiClient(), storage: _storage, host: this)
+       voice = voice ?? VoicePlayer(),
+       _api = api ?? ApiClient() {
+    sync = SyncService(api: _api, storage: _storage, host: this)
       ..addListener(notifyListeners);
   }
+
+  final ApiClient _api;
 
   final Storage _storage;
   final LocationService _location;
@@ -72,9 +77,14 @@ class AppController extends ChangeNotifier implements SyncHost {
       for (final p in _points)
         if (p.remoteId != null) p.remoteId,
     };
+    final shown = <String?>{...mine};
     return List<SpeedPoint>.unmodifiable([
       ..._points,
-      ..._community.where((c) => !mine.contains(c.remoteId)),
+      for (final c in _community)
+        if (shown.add(c.remoteId) || c.remoteId == null) c,
+      // Cameras and bumps along the chosen route (also far away).
+      for (final r in _routePoints)
+        if (shown.add(r.remoteId)) r,
     ]);
   }();
 
@@ -146,6 +156,7 @@ class AppController extends ChangeNotifier implements SyncHost {
 
   void _onSample(DriveSample s) {
     _position = s;
+    _updateRouteProgress(s);
     final all = mapPoints;
     final result = _engine.update(s, all, _settings);
     _active = result.active;
@@ -392,8 +403,159 @@ class AppController extends ChangeNotifier implements SyncHost {
     notifyListeners();
   }
 
+  /// Tests: a GPS fix without a phone.
+  @visibleForTesting
+  void debugGpsFix(DriveSample s) {
+    _liveFix = true;
+    _onSample(s);
+  }
+
+  // ---- Search and directions -------------------------------------------
+
+  Place? _destination;
+  List<RouteOption> _routeOptions = const [];
+  int _selectedRoute = 0;
+  bool _routeActive = false;
+  List<SpeedPoint> _routePoints = const [];
+  double? _remainingM;
+  bool _offRoute = false;
+  DateTime? _offRouteSince;
+  int _routeHint = 0;
+  final _messages = StreamController<String>.broadcast();
+
+  /// Where the driver is going (while choosing or driving a route).
+  Place? get destination => _destination;
+
+  /// The ways to drive there, fastest first.
+  List<RouteOption> get routeOptions => _routeOptions;
+  int get selectedRoute => _selectedRoute;
+  RouteOption? get route =>
+      _routeOptions.isEmpty ? null : _routeOptions[_selectedRoute];
+
+  /// Driving the chosen route (not just looking at the options).
+  bool get routeActive => _routeActive;
+
+  /// Meters left to drive, and the normal time for them.
+  double? get remainingM => _remainingM;
+  int? get remainingS {
+    final r = route;
+    final m = _remainingM;
+    if (r == null || m == null || r.distanceM == 0) return null;
+    return (r.durationS * m / r.distanceM).round();
+  }
+
+  /// More than [offRouteM] away from the route for a while.
+  bool get offRoute => _offRoute;
+  static const offRouteM = 80.0;
+  static const arrivedM = 40.0;
+
+  /// One-off messages for the screen ("You have arrived").
+  Stream<String> get messages => _messages.stream;
+
+  /// Search for places (search as you type), nearest to the driver first.
+  Future<List<Place>> searchPlaces(String query) async {
+    await sync.ensureAccount();
+    final p = _position;
+    return _api.places(query, lat: p?.lat, lng: p?.lng);
+  }
+
+  /// Gets the ways to drive from here to [to]. Throws [ApiException] when
+  /// offline, without GPS, or when no road leads there.
+  Future<void> planRoute(Place to) async {
+    final from = livePosition ?? _position;
+    if (from == null) {
+      throw const ApiException(0, 'no_gps', 'Waiting for your GPS position…');
+    }
+    await sync.ensureAccount();
+    final json = await _api.routes(from.lat, from.lng, to.lat, to.lng);
+    final options = [
+      for (final r in (json['routes'] as List).cast<Map<String, dynamic>>())
+        RouteOption.fromJson(r),
+    ];
+    final points = [
+      for (final p in (json['points'] as List).cast<Map<String, dynamic>>())
+        SpeedPoint.fromServer(p),
+    ];
+    _destination = to;
+    _routeOptions = options;
+    _selectedRoute = 0;
+    _routeActive = false;
+    _remainingM = null;
+    _offRoute = false;
+    _routePoints = points;
+    _pointsChanged();
+  }
+
+  void selectRoute(int index) {
+    if (index < 0 || index >= _routeOptions.length) return;
+    _selectedRoute = index;
+    notifyListeners();
+  }
+
+  /// Starts driving the chosen route.
+  void startRoute() {
+    if (route == null) return;
+    _routeActive = true;
+    _routeHint = 0;
+    _offRoute = false;
+    _offRouteSince = null;
+    final p = livePosition ?? _position;
+    if (p != null) _updateRouteProgress(p);
+    notifyListeners();
+  }
+
+  /// Stops the route (or the choosing) and removes it from the map.
+  void endRoute() {
+    if (_destination == null && _routeOptions.isEmpty) return;
+    _destination = null;
+    _routeOptions = const [];
+    _routeActive = false;
+    _remainingM = null;
+    _offRoute = false;
+    _routePoints = const [];
+    _pointsChanged();
+  }
+
+  /// Plans the route again from here (after leaving it).
+  Future<void> reroute() async {
+    final to = _destination;
+    if (to == null) return;
+    await planRoute(to);
+    startRoute();
+  }
+
+  void _updateRouteProgress(DriveSample s) {
+    final r = route;
+    if (!_routeActive || r == null) return;
+    final progress = r.progress(s.lat, s.lng, hint: _routeHint);
+    _routeHint = progress.index;
+    _remainingM = progress.remainingM;
+    final dest = _destination;
+    final atDestination =
+        dest != null &&
+        distanceMeters(s.lat, s.lng, dest.lat, dest.lng) < arrivedM;
+    if (atDestination ||
+        (progress.remainingM < arrivedM && progress.offRouteM < offRouteM)) {
+      final name = dest?.name;
+      endRoute();
+      _messages.add(
+        name == null ? 'You have arrived' : 'You have arrived at $name',
+      );
+      return;
+    }
+    // Off the route for 15 s (not just a GPS jump): offer a new route.
+    if (progress.offRouteM > offRouteM) {
+      _offRouteSince ??= s.time;
+      _offRoute = s.time.difference(_offRouteSince!).inSeconds >= 15;
+    } else {
+      _offRouteSince = null;
+      _offRoute = false;
+    }
+  }
+
   @override
   void dispose() {
+    _messages.close();
     _gpsSub?.cancel();
     _simSub?.cancel();
     sync.dispose();
