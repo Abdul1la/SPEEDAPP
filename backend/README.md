@@ -80,6 +80,28 @@ Then put HTTPS in front of port 3000 (for example [Caddy](https://caddyserver.co
 `caddy reverse-proxy --from api.yourdomain.com --to localhost:3000`) and set
 `TRUST_PROXY=true` in `.env`. The app must use `https://` in production.
 
+### Better place search (Google Places)
+
+Search works without any key, using OpenStreetMap. In Iraq OpenStreetMap
+misses many places (for example residential projects like Lelav City, and
+most shops and restaurants). For search as complete as Google Maps:
+
+1. In [Google Cloud Console](https://console.cloud.google.com) (the project
+   with the app's Maps key): **APIs & Services → Library → Places API (New) →
+   Enable**.
+2. **Credentials → Create credentials → API key**. Under *API restrictions*
+   pick only **Places API (New)**. This is a server key: don't reuse the
+   app's Android/iOS key.
+3. Set it on the server: `GOOGLE_PLACES_KEY=...` (Railway: service →
+   *Variables*; Docker: `.env`). Redeploy.
+
+Then search uses Google (Iraq first, then the world) and falls back to
+OpenStreetMap if Google fails; the server log says why
+(`Google Places error 403: ...`). Google charges per use beyond a free
+monthly amount. Each search costs one lookup when a result is picked
+(typing in between is grouped into one session). Set a budget alert in
+Google Cloud Billing.
+
 **Backups:** `docker compose exec db mysqldump -uroot -p speedalert > backup.sql`
 (run it daily, for example from cron, and keep copies off the server).
 
@@ -112,6 +134,28 @@ It runs once, on the next start (or `npm run migrate`). Never edit a migration t
   it becomes a community point and the owner's delete counts as "gone".
 - Each driver can add at most `MAX_POINTS_PER_DAY` points a day (default 100).
 
+### Police radar (`type: "mobile"`, `src/services/slowdowns.ts`)
+
+Mobile speed cameras and police cars with a camera move from day to day, so
+these points are temporary (`expiresAt`).
+
+- **Found automatically:** the app sends `POST /v1/slowdowns` when its driver
+  suddenly brakes on a fast road (from 50+ km/h, 20+ km/h slower, without
+  stopping, then speeds up again; never braking for a turn). Only that spot
+  is sent. When **3 different drivers** do this within **150 m**, the same
+  way, within **90 minutes**, a police radar is added (`auto: true`). It is
+  not added next to a known camera or bump (200 m), or at a spot where 2+
+  drivers braked on 3 of the last 14 days (a junction or a bad road).
+  Slowdowns are kept 14 days.
+- **Reported by a driver:** `POST /v1/points` with `type: "mobile"`. A report
+  within 100 m of an active one confirms it. Always public and both ways.
+- **Lifetime:** 2 hours after the last report, confirmation or slowdown.
+- **"Still there?":** the app asks drivers who pass one. 2 "gone" votes since
+  the last confirmation hide it, however many confirmed it earlier; a new
+  confirmation brings it back.
+- Expired ones are left out of the map and routes, and sent as `removed` in
+  delta syncs.
+
 ## API
 
 All requests and responses are JSON. Send the token from sign-in as
@@ -138,11 +182,20 @@ All requests and responses are JSON. Send the token from sign-in as
 | PATCH | `/v1/points/:id` | Owner only. Any point field; `null` clears it. |
 | DELETE | `/v1/points/:id` | Owner only. `{ removed, kept }` (see rules). |
 | PUT | `/v1/points/:id/vote` | `{ vote: "confirm" \| "gone" }` |
+| POST | `/v1/slowdowns` | `{ lat, lng, heading?, speedBefore, speedMin }` (km/h). Returns `{ counted, radar }` (see Police radar). |
 | DELETE | `/v1/points/:id/vote` | Take back your vote. |
 | POST | `/v1/points/:id/reports` | `{ reason: "fake" \| "wrong_place" \| "wrong_details" \| "duplicate" \| "other", comment? }` |
 
 A point: `{ id, type, lat, lng, speedLimit, direction, note, visibility, status,
 confirmCount, goneCount, lastConfirmedAt, mine, myVote, clientId (owner only), createdAt, updatedAt }`.
+
+### Search and directions
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/v1/places?q&lat&lng&lang&session` | Search as you type, Iraq first. `{ places: [{ id, name, address, lat, lng, kind, distanceM? }], source: "google" \| "osm" }`. Google results have `lat`/`lng` null. |
+| GET | `/v1/places/:id?session` | Where a result is (for Google ids `g:...`). Use the same `session` as the search. |
+| GET | `/v1/routes?from=lat,lng&to=lat,lng` | Ways to drive there, fastest first, with cameras/bumps on each and turn-by-turn `steps`. |
 
 ### My account
 

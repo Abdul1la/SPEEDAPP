@@ -3,7 +3,10 @@ import 'package:flutter/material.dart';
 import '../app_controller.dart';
 import '../models/route_plan.dart';
 import '../models/speed_point.dart';
+import '../screens/route_details_screen.dart';
+import '../screens/search_screen.dart';
 import '../theme/app_theme.dart';
+import '../utils/geo.dart';
 import 'ui.dart';
 
 /// "47 min", "2 h 17 min".
@@ -45,6 +48,13 @@ class _RouteSheet extends StatelessWidget {
         final dest = app.destination;
         final options = app.routeOptions;
         if (dest == null || options.isEmpty) return const SizedBox(height: 120);
+        final pos = app.position;
+        final about = [
+          placeKindLabel(dest.kind),
+          if (dest.address.isNotEmpty) dest.address,
+          if (pos != null)
+            '${formatDistance(distanceMeters(pos.lat, pos.lng, dest.lat, dest.lng))} away',
+        ].join(' · ');
         return Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -56,12 +66,27 @@ class _RouteSheet extends StatelessWidget {
                 Space.xl,
                 Space.md,
               ),
-              child: SheetHeader(
-                title: 'To ${dest.name}',
-                subtitle: options.length == 1
-                    ? (dest.address.isEmpty ? null : dest.address)
-                    : '${options.length} ways to drive there. Choose one.',
-                onClose: () => Navigator.pop(context, false),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  SheetHeader(
+                    title: 'To ${dest.name}',
+                    onClose: () => Navigator.pop(context, false),
+                  ),
+                  const SizedBox(height: 3),
+                  // One line, so the ways below keep their room.
+                  Text(
+                    options.length == 1
+                        ? about
+                        : '$about · ${options.length} ways',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: context.palette.textSecondary,
+                    ),
+                  ),
+                ],
               ),
             ),
             Flexible(
@@ -75,6 +100,11 @@ class _RouteSheet extends StatelessWidget {
                   fastest: i == 0 && options.length > 1,
                   selected: i == app.selectedRoute,
                   onTap: () => app.selectRoute(i),
+                  onDetails: () async {
+                    app.selectRoute(i);
+                    final start = await showRouteDetails(context, app, i);
+                    if (start && context.mounted) Navigator.pop(context, true);
+                  },
                 ),
               ),
             ),
@@ -104,17 +134,20 @@ class _RouteCard extends StatelessWidget {
     required this.fastest,
     required this.selected,
     required this.onTap,
+    required this.onDetails,
   });
 
   final RouteOption option;
   final bool fastest;
   final bool selected;
   final VoidCallback onTap;
+  final VoidCallback onDetails;
 
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
-    final none = option.cameras == 0 && option.bumps == 0;
+    final none =
+        option.cameras == 0 && option.bumps == 0 && option.mobiles == 0;
     return Semantics(
       selected: selected,
       button: true,
@@ -185,28 +218,49 @@ class _RouteCard extends StatelessWidget {
               ),
             ],
             const SizedBox(height: Space.sm),
-            if (none)
-              Text(
-                'No speed cameras or bumps known on this way',
-                style: TextStyle(fontSize: 13, color: p.textTertiary),
-              )
-            else
-              Wrap(
-                spacing: Space.md,
-                runSpacing: Space.xs,
-                children: [
-                  _Count(
-                    type: PointType.camera,
-                    count: option.cameras,
-                    label: 'camera',
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: none
+                      ? Text(
+                          'No speed cameras or bumps known on this way',
+                          style: TextStyle(fontSize: 13, color: p.textTertiary),
+                        )
+                      : Wrap(
+                          spacing: Space.md,
+                          runSpacing: Space.xs,
+                          children: [
+                            _Count(
+                              type: PointType.camera,
+                              count: option.cameras,
+                              label: 'camera',
+                            ),
+                            _Count(
+                              type: PointType.bump,
+                              count: option.bumps,
+                              label: 'speed bump',
+                            ),
+                            if (option.mobiles > 0)
+                              _Count(
+                                count: option.mobiles,
+                                label: 'police radar',
+                                icon: Icons.local_police_rounded,
+                              ),
+                          ],
+                        ),
+                ),
+                TextButton.icon(
+                  onPressed: onDetails,
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: Space.sm),
                   ),
-                  _Count(
-                    type: PointType.bump,
-                    count: option.bumps,
-                    label: 'speed bump',
-                  ),
-                ],
-              ),
+                  icon: const Icon(Icons.info_outline_rounded, size: 18),
+                  label: const Text('Details'),
+                ),
+              ],
+            ),
           ],
         ),
       ),
@@ -215,10 +269,18 @@ class _RouteCard extends StatelessWidget {
 }
 
 class _Count extends StatelessWidget {
-  const _Count({required this.type, required this.count, required this.label});
-  final PointType type;
+  const _Count({
+    this.type,
+    required this.count,
+    required this.label,
+    this.icon,
+  });
+  final PointType? type;
   final int count;
   final String label;
+
+  /// Used when there is no [type] (police radars).
+  final IconData? icon;
 
   @override
   Widget build(BuildContext context) {
@@ -226,17 +288,24 @@ class _Count extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        PointGlyph(
-          type: type,
-          size: 16,
-          color: count == 0 ? p.textTertiary : p.colorFor(type),
-        ),
+        if (type case final t?)
+          PointGlyph(
+            type: t,
+            size: 16,
+            color: count == 0 ? p.textTertiary : p.colorFor(t),
+          )
+        else
+          Icon(icon, size: 16, color: count == 0 ? p.textTertiary : p.danger),
         const SizedBox(width: 4),
-        Text(
-          '$count $label${count == 1 ? '' : 's'}',
-          style: TextStyle(
-            fontSize: 13,
-            color: count == 0 ? p.textTertiary : p.text,
+        Flexible(
+          child: Text(
+            '$count $label${count == 1 ? '' : 's'}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 13,
+              color: count == 0 ? p.textTertiary : p.text,
+            ),
           ),
         ),
       ],

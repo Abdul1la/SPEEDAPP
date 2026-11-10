@@ -50,7 +50,16 @@ async function rebuildSchema(db: Db) {
   await runMigrations(TEST_DATABASE_URL);
 }
 
-const DATA_TABLES = ['audit_log', 'user_settings', 'point_reports', 'point_votes', 'points', 'sessions', 'users'];
+const DATA_TABLES = [
+  'audit_log',
+  'user_settings',
+  'slowdowns',
+  'point_reports',
+  'point_votes',
+  'points',
+  'sessions',
+  'users',
+];
 
 async function emptyTables(db: Db) {
   const conn = await db.getConnection();

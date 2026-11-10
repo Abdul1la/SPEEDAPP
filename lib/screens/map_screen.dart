@@ -66,6 +66,10 @@ class _MapScreenState extends State<MapScreen> {
 
   /// Choosing a route: the sheet covers the bottom half of the map.
   bool _planning = false;
+
+  /// Showing the whole remaining route (and me on it), kept up to date.
+  bool _overview = false;
+  DateTime _lastOverviewFit = DateTime(2000);
   bool _loadingRoute = false;
   StreamSubscription<String>? _messages;
 
@@ -101,6 +105,16 @@ class _MapScreenState extends State<MapScreen> {
 
   void _onAppChanged() {
     final pos = app.position;
+    if (_overview) {
+      if (!app.routeActive) {
+        // Route ended (arrived): back to following the car.
+        _overview = false;
+        _recenter();
+      } else if (DateTime.now().difference(_lastOverviewFit).inSeconds >= 5) {
+        _fitRemainingRoute();
+      }
+      return;
+    }
     if (!_follow || pos == null || identical(pos, _lastFollowed)) return;
     _lastFollowed = pos;
     _moveCameraTo(pos.lat, pos.lng, pos.speedKmh);
@@ -124,7 +138,10 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   void _recenter() {
-    setState(() => _follow = true);
+    setState(() {
+      _follow = true;
+      _overview = false;
+    });
     final pos = app.position;
     if (pos != null) _moveCameraTo(pos.lat, pos.lng, pos.speedKmh);
   }
@@ -140,7 +157,12 @@ class _MapScreenState extends State<MapScreen> {
       final lat = (b.northeast.latitude + b.southwest.latitude) / 2;
       final lng = (b.northeast.longitude + b.southwest.longitude) / 2;
       final km =
-          distanceMeters(lat, lng, b.northeast.latitude, b.northeast.longitude) /
+          distanceMeters(
+            lat,
+            lng,
+            b.northeast.latitude,
+            b.northeast.longitude,
+          ) /
           1000;
       unawaited(app.sync.browse(lat, lng, km));
     } catch (_) {
@@ -367,6 +389,46 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  /// Live overview: the rest of the route and where I am, updated as I
+  /// drive (every few seconds). Follow-me (the arrow button) ends it.
+  void _showOverview() {
+    setState(() {
+      _overview = true;
+      _follow = false;
+    });
+    _fitRemainingRoute();
+  }
+
+  void _fitRemainingRoute() {
+    final map = _map;
+    final r = app.route;
+    if (map == null || r == null) return;
+    _lastOverviewFit = DateTime.now();
+    var minLat = 90.0, maxLat = -90.0, minLng = 180.0, maxLng = -180.0;
+    void include(double lat, double lng) {
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+      if (lng < minLng) minLng = lng;
+      if (lng > maxLng) maxLng = lng;
+    }
+
+    final from = app.routeIndex.clamp(0, r.path.length - 1);
+    for (var i = from; i < r.path.length; i++) {
+      include(r.path[i].lat, r.path[i].lng);
+    }
+    final pos = app.position;
+    if (pos != null) include(pos.lat, pos.lng);
+    map.animateCamera(
+      CameraUpdate.newLatLngBounds(
+        LatLngBounds(
+          southwest: LatLng(minLat, minLng),
+          northeast: LatLng(maxLat, maxLng),
+        ),
+        56,
+      ),
+    );
+  }
+
   List<LatLng> _lineFor(RouteOption r) =>
       _lines[r] ??= [for (final pt in r.path) LatLng(pt.lat, pt.lng)];
 
@@ -400,7 +462,6 @@ class _MapScreenState extends State<MapScreen> {
     final p = context.palette;
     final pos = app.position;
     final active = app.active;
-    final locationOk = app.locationStatus == LocationStatus.ok;
 
     final markers = <Marker>{
       // My points and other drivers' points.
@@ -416,15 +477,20 @@ class _MapScreenState extends State<MapScreen> {
           draggable: !app.isSimulating && !pt.community,
           onDragEnd: (to) => _movePoint(pt, to),
         ),
-      if (app.isSimulating && pos != null && _icons.car != null)
+      // My car (instead of the blue dot). It lies flat on the map, pointing
+      // where I'm driving; faded until the GPS has a live fix.
+      if (pos != null && _icons.car != null)
         Marker(
           markerId: const MarkerId('_car'),
           position: LatLng(pos.lat, pos.lng),
           icon: _icons.car!,
           flat: true,
-          rotation: pos.heading ?? 0,
+          rotation: app.course ?? pos.heading ?? 0,
           anchor: const Offset(0.5, 0.5),
+          alpha: app.isSimulating || app.livePosition != null ? 1 : 0.55,
           zIndexInt: 10,
+          consumeTapEvents: true,
+          onTap: _recenter,
         ),
     };
 
@@ -483,14 +549,20 @@ class _MapScreenState extends State<MapScreen> {
       onPointerMove: (e) {
         final start = _pointerDown;
         if (start == null || (e.position - start).distance < kTouchSlop) return;
-        if (_follow) setState(() => _follow = false);
+        if (_follow || _overview) {
+          setState(() {
+            _follow = false;
+            _overview = false;
+          });
+        }
       },
       child: GoogleMap(
         initialCameraPosition: pos != null
             ? CameraPosition(target: LatLng(pos.lat, pos.lng), zoom: 16)
             : _fallbackCamera,
         style: mapStyleFor(app.settings.mapLook, Theme.of(context).brightness),
-        myLocationEnabled: locationOk && !app.isSimulating,
+        // The car marker shows where I am (not Google's blue dot).
+        myLocationEnabled: false,
         myLocationButtonEnabled: false,
         zoomControlsEnabled: false,
         mapToolbarEnabled: false,
@@ -530,6 +602,14 @@ class _MapScreenState extends State<MapScreen> {
         key: ValueKey('alert-${active.point.id}'),
         alert: active,
         zone: app.settings.distancesFor(active.point.type).first,
+      );
+    } else if (app.askStillThere case final radar?) {
+      // Just drove past a police radar: one tap keeps the map accurate.
+      card = StillThereCard(
+        key: ValueKey('still-${radar.id}'),
+        point: radar,
+        onAnswer: app.answerStillThere,
+        onClose: app.dismissStillThere,
       );
     } else if (app.ready &&
         app.locationStatus != null &&
@@ -628,6 +708,19 @@ class _MapScreenState extends State<MapScreen> {
               alignment: Alignment.centerRight,
               child: MapControlGroup(
                 controls: [
+                  // Always here, even when a warning covers the search bar.
+                  MapControl(
+                    icon: Icons.search_rounded,
+                    tooltip: 'Search places',
+                    onTap: _openSearch,
+                  ),
+                  if (app.routeActive)
+                    MapControl(
+                      icon: Icons.alt_route_rounded,
+                      tooltip: 'See the whole route',
+                      active: _overview,
+                      onTap: _overview ? _recenter : _showOverview,
+                    ),
                   MapControl(
                     icon: Icons.settings_outlined,
                     tooltip: 'Settings',

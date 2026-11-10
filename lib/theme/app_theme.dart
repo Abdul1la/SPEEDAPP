@@ -36,7 +36,14 @@ class Palette extends ThemeExtension<Palette> {
     required this.danger,
     required this.success,
     required this.warning,
+    this.radar = const Color(0xFF5856D6),
+    this.radarSoft = const Color(0xFFECEBFB),
   });
+
+  /// Police radar (mobile speed cameras): indigo, apart from cameras (red),
+  /// bumps (orange) and buttons (blue).
+  final Color radar;
+  final Color radarSoft;
 
   /// Grouped background (behind cards, sheets).
   final Color bg;
@@ -124,12 +131,24 @@ class Palette extends ThemeExtension<Palette> {
     danger: Color(0xFFFF453A),
     success: Color(0xFF30D158),
     warning: Color(0xFFFF9F0A),
+    radar: Color(0xFF7D7AFF),
+    radarSoft: Color(0xFF1E1D45),
   );
 
-  Color colorFor(PointType t) => t == PointType.camera ? camera : bump;
-  Color onColorFor(PointType t) =>
-      t == PointType.camera ? Colors.white : onBump;
-  Color softFor(PointType t) => t == PointType.camera ? cameraSoft : bumpSoft;
+  Color colorFor(PointType t) => switch (t) {
+    PointType.camera => camera,
+    PointType.bump => bump,
+    PointType.mobile => radar,
+  };
+  Color onColorFor(PointType t) => switch (t) {
+    PointType.camera || PointType.mobile => Colors.white,
+    PointType.bump => onBump,
+  };
+  Color softFor(PointType t) => switch (t) {
+    PointType.camera => cameraSoft,
+    PointType.bump => bumpSoft,
+    PointType.mobile => radarSoft,
+  };
 
   @override
   Palette copyWith() => this;
@@ -161,6 +180,8 @@ class Palette extends ThemeExtension<Palette> {
       danger: l(danger, other.danger),
       success: l(success, other.success),
       warning: l(warning, other.warning),
+      radar: l(radar, other.radar),
+      radarSoft: l(radarSoft, other.radarSoft),
     );
   }
 }
@@ -196,6 +217,7 @@ abstract final class AppColors {
   static const primary = Color(0xFF007AFF);
   static const camera = Color(0xFFFF3B30);
   static const bump = Color(0xFFFF9500);
+  static const radar = Color(0xFF5856D6);
   static const danger = Color(0xFFFF3B30);
   static const success = Color(0xFF34C759);
   static const textMuted = Color(0xFF8A93A3);
@@ -208,8 +230,11 @@ abstract final class AppColors {
   static const outline = Color(0x33808080);
 }
 
-Color colorFor(PointType t) =>
-    t == PointType.camera ? AppColors.camera : AppColors.bump;
+Color colorFor(PointType t) => switch (t) {
+  PointType.camera => AppColors.camera,
+  PointType.bump => AppColors.bump,
+  PointType.mobile => AppColors.radar,
+};
 
 // ---- Older names, kept so existing code compiles (flat now). ------------
 

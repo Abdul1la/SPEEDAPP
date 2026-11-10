@@ -12,7 +12,7 @@ const nullableInt = (minimum: number, maximum: number) =>
   ({ type: ['integer', 'null'], minimum, maximum }) as const;
 
 export const pointFields = {
-  type: { type: 'string', enum: ['camera', 'bump'] },
+  type: { type: 'string', enum: ['camera', 'bump', 'mobile'] },
   lat: { type: 'number', minimum: -90, maximum: 90 },
   lng: { type: 'number', minimum: -180, maximum: 180 },
   speedLimit: nullableInt(5, 300),

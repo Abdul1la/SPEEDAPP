@@ -10,6 +10,7 @@ import 'models/speed_point.dart';
 import 'services/alert_engine.dart';
 import 'services/api_client.dart';
 import 'services/location_service.dart';
+import 'services/slowdown_detector.dart';
 import 'services/sound_library.dart';
 import 'services/storage.dart';
 import 'services/sync_service.dart';
@@ -65,6 +66,27 @@ class AppController extends ChangeNotifier implements SyncHost {
   StreamSubscription<DriveSample>? _gpsSub;
   StreamSubscription<DriveSample>? _simSub;
 
+  // ---- Police radar ----
+  final SlowdownDetector _slowdowns = SlowdownDetector();
+  Timer? _expiryTimer;
+
+  /// The police radar the driver is passing now (within [_passRadiusM]).
+  SpeedPoint? _passing;
+
+  /// The police radar just passed: "still there?" is shown for [askFor].
+  SpeedPoint? _askStillThere;
+  Timer? _askTimer;
+
+  /// When each radar was last asked about (not again for [_askAgainAfter]).
+  final Map<String, DateTime> _asked = {};
+  static const _passRadiusM = 80.0;
+  static const _passedRadiusM = 150.0;
+  static const _askAgainAfter = Duration(minutes: 30);
+  static const askFor = Duration(seconds: 15);
+
+  /// Braking near a fixed camera or bump is explained by it.
+  static const _explainedWithinM = 200.0;
+
   /// My points.
   List<SpeedPoint> get points => List.unmodifiable(_points);
 
@@ -73,20 +95,27 @@ class AppController extends ChangeNotifier implements SyncHost {
 
   /// Everything that warns and shows on the map: mine + community.
   List<SpeedPoint> get mapPoints => _mapPoints ??= () {
+    final now = DateTime.now();
     final mine = {
       for (final p in _points)
         if (p.remoteId != null) p.remoteId,
     };
     final shown = <String?>{...mine};
     return List<SpeedPoint>.unmodifiable([
-      ..._points,
+      for (final p in _points)
+        if (!p.isExpired(now)) p,
       for (final c in _community)
-        if (shown.add(c.remoteId) || c.remoteId == null) c,
+        if ((shown.add(c.remoteId) || c.remoteId == null) && !c.isExpired(now))
+          c,
       // Cameras and bumps along the chosen route (also far away).
       for (final r in _routePoints)
-        if (shown.add(r.remoteId)) r,
+        if (shown.add(r.remoteId) && !r.isExpired(now)) r,
     ]);
   }();
+
+  /// A police radar the driver just drove past: the map asks "still
+  /// there?" for a few seconds. Answer with [answerStillThere].
+  SpeedPoint? get askStillThere => _askStillThere;
 
   @override
   AppSettings get settings => _settings;
@@ -113,6 +142,11 @@ class AppController extends ChangeNotifier implements SyncHost {
     _points = await _storage.loadPoints();
     _community = await _storage.loadCommunity();
     _mapPoints = null;
+    await _dropExpired();
+    _expiryTimer = Timer.periodic(
+      const Duration(minutes: 1),
+      (_) => unawaited(_dropExpired()),
+    );
     _settings = await _storage.loadSettings();
     voice.settings = _settings;
     await voice.init();
@@ -159,11 +193,102 @@ class AppController extends ChangeNotifier implements SyncHost {
     _updateRouteProgress(s);
     final all = mapPoints;
     final result = _engine.update(s, all, _settings);
-    _active = result.active;
+    // Standing still right at a point (parked there, or where it was
+    // added): no "0 m" warning that never goes away.
+    final a = result.active;
+    _active = a != null && s.stationary && a.distance < AlertEngine.closeRange
+        ? null
+        : a;
     _next = _engine.nextAhead(s, all);
     result.events.forEach(voice.announce);
-    if (!isSimulating) sync.positionChanged(s.lat, s.lng);
+    if (!isSimulating) {
+      sync.positionChanged(s.lat, s.lng);
+      _checkSlowdown(s, all);
+      _checkPassedRadar(s, all);
+    }
     notifyListeners();
+  }
+
+  // ---- Police radar -------------------------------------------------------
+
+  /// Sends a sudden slowdown (a likely police radar) unless a fixed camera
+  /// or bump explains it, or the driver turned this off.
+  void _checkSlowdown(DriveSample s, List<SpeedPoint> all) {
+    if (!_settings.findRadar) return;
+    final e = _slowdowns.add(s);
+    if (e == null) return;
+    final explained = all.any(
+      (p) =>
+          !p.type.temporary &&
+          distanceMeters(p.lat, p.lng, e.lat, e.lng) < _explainedWithinM,
+    );
+    if (!explained) unawaited(sync.reportSlowdown(e));
+  }
+
+  /// After driving past another driver's police radar, ask "still there?"
+  /// (once per radar every half hour). The answers keep the map accurate:
+  /// "no" twice takes it away, "yes" keeps it longer.
+  void _checkPassedRadar(DriveSample s, List<SpeedPoint> all) {
+    for (final p in all) {
+      if (!p.type.temporary || !p.community || p.remoteId == null) continue;
+      if (distanceMeters(s.lat, s.lng, p.lat, p.lng) < _passRadiusM) {
+        _passing = p;
+        return;
+      }
+    }
+    final passed = _passing;
+    if (passed == null ||
+        distanceMeters(s.lat, s.lng, passed.lat, passed.lng) < _passedRadiusM) {
+      return;
+    }
+    _passing = null;
+    final id = passed.remoteId!;
+    final last = _asked[id];
+    if (s.speedKmh < 10 ||
+        (last != null && s.time.difference(last) < _askAgainAfter)) {
+      return;
+    }
+    _asked[id] = s.time;
+    _askStillThere = passed;
+    _askTimer?.cancel();
+    _askTimer = Timer(askFor, dismissStillThere);
+  }
+
+  /// "Still there?" answered: [yes] confirms it, no says it's gone.
+  Future<void> answerStillThere(bool yes) async {
+    final p = _askStillThere;
+    dismissStillThere();
+    if (p == null) return;
+    try {
+      await vote(p, yes ? 'confirm' : 'gone');
+    } catch (e) {
+      debugPrint('Could not send the answer: $e');
+    }
+  }
+
+  void dismissStillThere() {
+    _askTimer?.cancel();
+    if (_askStillThere == null) return;
+    _askStillThere = null;
+    notifyListeners();
+  }
+
+  /// Police radar reports past their time leave the map (also offline).
+  Future<void> _dropExpired() async {
+    final now = DateTime.now();
+    final mine = _points.where((p) => !p.isExpired(now)).toList();
+    final community = _community.where((p) => !p.isExpired(now)).toList();
+    final routeChanged = _routePoints.any((p) => p.isExpired(now));
+    if (mine.length == _points.length &&
+        community.length == _community.length &&
+        !routeChanged) {
+      return;
+    }
+    _points = mine;
+    _community = community;
+    _pointsChanged();
+    await _storage.savePoints(_points);
+    await _storage.saveCommunity(_community);
   }
 
   void _pointsChanged() {
@@ -435,6 +560,9 @@ class AppController extends ChangeNotifier implements SyncHost {
   /// Driving the chosen route (not just looking at the options).
   bool get routeActive => _routeActive;
 
+  /// Where on the route's path the driver is now (index into its points).
+  int get routeIndex => _routeHint;
+
   /// Meters left to drive, and the normal time for them.
   double? get remainingM => _remainingM;
   int? get remainingS {
@@ -452,11 +580,20 @@ class AppController extends ChangeNotifier implements SyncHost {
   /// One-off messages for the screen ("You have arrived").
   Stream<String> get messages => _messages.stream;
 
-  /// Search for places (search as you type), nearest to the driver first.
-  Future<List<Place>> searchPlaces(String query) async {
+  /// Search for places (search as you type): Iraq first, nearest to the
+  /// driver first. One [session] per search screen (see [resolvePlace]).
+  Future<List<Place>> searchPlaces(String query, {String? session}) async {
     await sync.ensureAccount();
     final p = _position;
-    return _api.places(query, lat: p?.lat, lng: p?.lng);
+    return _api.places(query, lat: p?.lat, lng: p?.lng, session: session);
+  }
+
+  /// A search result with its spot on the map. Google results come without
+  /// one; this asks the server (ending the search [session]).
+  Future<Place> resolvePlace(Place place, {String? session}) async {
+    if (place.located) return place;
+    await sync.ensureAccount();
+    return place.locatedAt(await _api.place(place.id, session: session));
   }
 
   /// Gets the ways to drive from here to [to]. Throws [ApiException] when
@@ -555,6 +692,8 @@ class AppController extends ChangeNotifier implements SyncHost {
 
   @override
   void dispose() {
+    _expiryTimer?.cancel();
+    _askTimer?.cancel();
     _messages.close();
     _gpsSub?.cancel();
     _simSub?.cancel();

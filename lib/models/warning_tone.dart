@@ -24,6 +24,7 @@ enum WarningTone {
   static WarningTone defaultFor(PointType type) => switch (type) {
     PointType.camera => chime,
     PointType.bump => bump,
+    PointType.mobile => alert,
   };
 
   static WarningTone? fromKey(String? key) {

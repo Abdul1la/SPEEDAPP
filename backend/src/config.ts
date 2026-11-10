@@ -16,6 +16,11 @@ export interface Config {
   photonUrl: string;
   /** Driving routes service (OSRM, OpenStreetMap). */
   osrmUrl: string;
+  /** Google Places (New) key: far better search (every shop, restaurant,
+   * mall...). Empty = OpenStreetMap search only. */
+  googlePlacesKey?: string;
+  /** Search shows this country's places first (two-letter code). */
+  searchCountry?: string;
 }
 
 function int(value: string | undefined, fallback: number): number {
@@ -55,5 +60,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rateLimit: bool(env.RATE_LIMIT, true),
     photonUrl: env.PHOTON_URL || 'https://photon.komoot.io',
     osrmUrl: env.OSRM_URL || 'https://router.project-osrm.org',
+    googlePlacesKey: env.GOOGLE_PLACES_KEY?.trim() || '',
+    searchCountry: (env.SEARCH_COUNTRY?.trim() || 'iq').toLowerCase(),
   };
 }

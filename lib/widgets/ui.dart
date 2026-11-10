@@ -557,10 +557,22 @@ class PointGlyph extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = color ?? IconTheme.of(context).color ?? Colors.white;
-    if (type == PointType.camera) {
-      return Icon(Icons.photo_camera_rounded, size: size, color: c);
-    }
-    return CustomPaint(size: Size.square(size), painter: BumpPainter(c));
+    return switch (type) {
+      PointType.camera => Icon(
+        Icons.photo_camera_rounded,
+        size: size,
+        color: c,
+      ),
+      PointType.mobile => Icon(
+        Icons.local_police_rounded,
+        size: size,
+        color: c,
+      ),
+      PointType.bump => CustomPaint(
+        size: Size.square(size),
+        painter: BumpPainter(c),
+      ),
+    };
   }
 }
 

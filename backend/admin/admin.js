@@ -89,7 +89,9 @@ const when = (iso) => (iso ? new Date(iso).toLocaleString() : '—');
 const mapLink = (p) =>
   h('a', { href: `https://www.google.com/maps?q=${p.lat},${p.lng}`, target: '_blank', rel: 'noopener noreferrer' },
     `${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}`);
-const typeTag = (p) => h('span', { class: `tag ${p.type}` }, p.type === 'camera' ? 'Speed camera' : 'Speed bump');
+const TYPE_LABELS = { camera: 'Speed camera', bump: 'Speed bump', mobile: 'Police radar' };
+const typeTag = (p) =>
+  h('span', { class: `tag ${p.type}` }, (TYPE_LABELS[p.type] ?? p.type) + (p.auto ? ' (found automatically)' : ''));
 const statusTag = (s, reason) => h('span', { class: `tag ${s}` }, reason ? `${s} · ${reason}` : s);
 const who = (u) => (u ? u.email || u.displayName || `Driver #${u.id}` : 'Community');
 const isAdmin = () => state.me?.role === 'admin';
@@ -203,6 +205,7 @@ const VIEWS = {
         stat('Open reports', s.reports.open),
         stat('Active cameras', s.points.cameras),
         stat('Active speed bumps', s.points.bumps),
+        stat('Police radar now', s.points.mobiles),
         stat('Hidden points', s.points.hidden),
         stat('Removed points', s.points.removed),
         stat('Drivers', s.users.total),
@@ -289,7 +292,8 @@ const VIEWS = {
       const edit = h('form', { class: 'inline-form', hidden: true },
         h('label', {}, 'Type', h('select', { name: 'type' },
           h('option', { value: 'camera', selected: p.type === 'camera' }, 'Speed camera'),
-          h('option', { value: 'bump', selected: p.type === 'bump' }, 'Speed bump'))),
+          h('option', { value: 'bump', selected: p.type === 'bump' }, 'Speed bump'),
+          h('option', { value: 'mobile', selected: p.type === 'mobile' }, 'Police radar'))),
         h('label', {}, 'Speed limit', h('input', { name: 'speedLimit', type: 'number', min: 5, max: 300, value: p.speedLimit ?? '' })),
         h('label', {}, 'Note', h('input', { name: 'note', maxlength: 200, value: p.note ?? '' })),
         h('button', { type: 'submit', class: 'primary' }, 'Save'));

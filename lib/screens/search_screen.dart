@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 
@@ -21,6 +23,7 @@ Future<Place?> showPlaceSearch(BuildContext context, AppController app) =>
     );
 
 /// Search as you type ("Duhok", a street, a shop...), with recent places.
+/// Places in Iraq come first, then the rest of the world.
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key, required this.app, this.storage});
 
@@ -45,6 +48,14 @@ class _SearchScreenState extends State<SearchScreen> {
   String? _error;
   Timer? _timer;
   int _request = 0;
+
+  /// The place being looked up after a tap (Google results), if any.
+  String? _resolving;
+
+  /// One id for this whole search (Google bills it as one search).
+  final String _session = base64Url
+      .encode(List.generate(24, (_) => Random.secure().nextInt(256)))
+      .replaceAll('=', '');
 
   @override
   void initState() {
@@ -82,7 +93,7 @@ class _SearchScreenState extends State<SearchScreen> {
   Future<void> _search(String q) async {
     final id = ++_request;
     try {
-      final found = await widget.app.searchPlaces(q);
+      final found = await widget.app.searchPlaces(q, session: _session);
       if (!mounted || id != _request) return; // a newer search is running
       setState(() {
         _results = found;
@@ -102,12 +113,33 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Future<void> _pick(Place place) async {
+    if (_resolving != null) return;
+    var picked = place;
+    if (!place.located) {
+      setState(() => _resolving = place.id);
+      try {
+        picked = await widget.app.resolvePlace(place, session: _session);
+      } on ApiException catch (e) {
+        if (!mounted) return;
+        setState(() => _resolving = null);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              e.offline
+                  ? 'No internet connection. Try again when online.'
+                  : e.message,
+            ),
+          ),
+        );
+        return;
+      }
+    }
     final recent = [
-      place,
-      ..._recent.where((r) => r.id != place.id),
+      picked,
+      ..._recent.where((r) => r.id != picked.id),
     ].take(_maxRecent).toList();
     unawaited(_storage.saveRecentPlaces(recent).catchError((_) {}));
-    if (mounted) Navigator.pop(context, place);
+    if (mounted) Navigator.pop(context, picked);
   }
 
   Future<void> _clearRecent() async {
@@ -151,7 +183,7 @@ class _SearchScreenState extends State<SearchScreen> {
                         if (t.trim().length >= 2) _search(t.trim());
                       },
                       decoration: InputDecoration(
-                        hintText: 'Search places, e.g. Duhok',
+                        hintText: 'Search places, shops, restaurants…',
                         prefixIcon: const Icon(Icons.search_rounded),
                         suffixIcon: _query.text.isEmpty
                             ? null
@@ -203,7 +235,7 @@ class _SearchScreenState extends State<SearchScreen> {
                     _Hint(
                       icon: Icons.travel_explore_rounded,
                       text:
-                          'Type a city, street or place. Then pick the way to drive there; the app shows the speed cameras and bumps on each way.',
+                          'Type a city, area, street, shop, restaurant or mall. Places in Iraq come first. Then pick the way to drive there; the app shows the speed cameras and bumps on each way.',
                     ),
                   if (!showRecent && _error != null)
                     _Hint(icon: Icons.search_off_rounded, text: _error!),
@@ -216,6 +248,7 @@ class _SearchScreenState extends State<SearchScreen> {
                             _PlaceRow(
                               place: items[i],
                               recent: showRecent,
+                              busy: _resolving == items[i].id,
                               from: switch (widget.app.position) {
                                 final pos? => (lat: pos.lat, lng: pos.lng),
                                 null => null,
@@ -226,6 +259,8 @@ class _SearchScreenState extends State<SearchScreen> {
                         ],
                       ),
                     ),
+                  if (!showRecent && items.isNotEmpty)
+                    _Credit(google: items.any((p) => p.fromGoogle)),
                 ],
               ),
             ),
@@ -241,47 +276,28 @@ class _PlaceRow extends StatelessWidget {
     required this.place,
     required this.recent,
     required this.onTap,
+    this.busy = false,
     this.from,
   });
 
   final Place place;
   final bool recent;
   final VoidCallback onTap;
-  final ({double lat, double lng})? from;
 
-  static IconData _icon(String kind) => switch (kind) {
-    'city' ||
-    'town' ||
-    'village' ||
-    'hamlet' ||
-    'suburb' ||
-    'neighbourhood' ||
-    'state' ||
-    'county' => Icons.location_city_rounded,
-    'motorway' ||
-    'trunk' ||
-    'primary' ||
-    'secondary' ||
-    'tertiary' ||
-    'residential' ||
-    'road' ||
-    'street' => Icons.route_rounded,
-    'restaurant' || 'cafe' || 'fast_food' => Icons.restaurant_rounded,
-    'fuel' => Icons.local_gas_station_rounded,
-    'hospital' || 'clinic' || 'pharmacy' => Icons.local_hospital_rounded,
-    'school' || 'university' || 'college' => Icons.school_rounded,
-    'hotel' => Icons.hotel_rounded,
-    'mosque' || 'church' || 'place_of_worship' => Icons.mosque_rounded,
-    _ => Icons.place_rounded,
-  };
+  /// Looking up where it is (shows a spinner).
+  final bool busy;
+  final ({double lat, double lng})? from;
 
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
     final f = from;
-    final km = f == null
-        ? null
-        : distanceMeters(f.lat, f.lng, place.lat, place.lng) / 1000;
+    final meters =
+        place.distanceM ??
+        (f == null || !place.located
+            ? null
+            : distanceMeters(f.lat, f.lng, place.lat, place.lng));
+    final km = meters == null ? null : meters / 1000;
     final distance = km == null
         ? null
         : (km < 10 ? '${km.toStringAsFixed(1)} km' : '${km.round()} km');
@@ -297,7 +313,7 @@ class _PlaceRow extends StatelessWidget {
             IconTile(
               color: recent ? p.textSecondary : p.primary,
               soft: true,
-              icon: recent ? Icons.history_rounded : _icon(place.kind),
+              icon: recent ? Icons.history_rounded : placeIcon(place.kind),
             ),
             const SizedBox(width: Space.md),
             Expanded(
@@ -324,7 +340,13 @@ class _PlaceRow extends StatelessWidget {
                 ],
               ),
             ),
-            if (distance != null) ...[
+            if (busy) ...[
+              const SizedBox(width: Space.sm),
+              const SizedBox.square(
+                dimension: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ] else if (distance != null) ...[
               const SizedBox(width: Space.sm),
               Text(
                 distance,
@@ -332,6 +354,29 @@ class _PlaceRow extends StatelessWidget {
               ),
             ],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Where the results come from (the services' terms ask for this).
+class _Credit extends StatelessWidget {
+  const _Credit({required this.google});
+  final bool google;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return Padding(
+      padding: const EdgeInsets.only(top: Space.sm, right: Space.xs),
+      child: Text(
+        google ? 'Google Maps' : '© OpenStreetMap contributors',
+        textAlign: TextAlign.end,
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: google ? FontWeight.w500 : FontWeight.w400,
+          color: p.textTertiary,
         ),
       ),
     );
@@ -365,3 +410,76 @@ class _Hint extends StatelessWidget {
     );
   }
 }
+
+/// An icon for a kind of place (city, road, mall, fuel station...).
+IconData placeIcon(String kind) => switch (kind) {
+  'city' ||
+  'town' ||
+  'village' ||
+  'hamlet' ||
+  'state' ||
+  'county' => Icons.location_city_rounded,
+  'suburb' ||
+  'neighbourhood' ||
+  'quarter' ||
+  'residential' ||
+  'apartments' => Icons.holiday_village_rounded,
+  'motorway' ||
+  'trunk' ||
+  'primary' ||
+  'secondary' ||
+  'tertiary' ||
+  'road' ||
+  'street' => Icons.route_rounded,
+  'address' || 'house' || 'building' => Icons.home_rounded,
+  'mall' => Icons.local_mall_rounded,
+  'supermarket' || 'convenience' => Icons.shopping_cart_rounded,
+  'shop' || 'clothes' || 'electronics' => Icons.storefront_rounded,
+  'bakery' => Icons.bakery_dining_rounded,
+  'restaurant' || 'fast_food' => Icons.restaurant_rounded,
+  'cafe' => Icons.local_cafe_rounded,
+  'fuel' => Icons.local_gas_station_rounded,
+  'hospital' || 'clinic' || 'pharmacy' => Icons.local_hospital_rounded,
+  'school' || 'university' || 'college' => Icons.school_rounded,
+  'hotel' => Icons.hotel_rounded,
+  'mosque' || 'church' || 'place_of_worship' => Icons.mosque_rounded,
+  'bank' => Icons.account_balance_rounded,
+  'park' || 'garden' => Icons.park_rounded,
+  'airport' || 'aerodrome' => Icons.flight_rounded,
+  'car_repair' || 'car_dealer' || 'car' => Icons.car_repair_rounded,
+  'gym' || 'fitness_centre' => Icons.fitness_center_rounded,
+  'attraction' || 'viewpoint' => Icons.photo_camera_back_rounded,
+  _ => Icons.place_rounded,
+};
+
+/// "City", "Mall", "Fuel station"... for a kind of place.
+String placeKindLabel(String kind) => switch (kind) {
+  'city' => 'City',
+  'town' => 'Town',
+  'village' || 'hamlet' => 'Village',
+  'suburb' || 'neighbourhood' || 'quarter' => 'Area',
+  'residential' || 'apartments' => 'Residential area',
+  'state' => 'Province',
+  'county' || 'district' => 'District',
+  'motorway' ||
+  'trunk' ||
+  'primary' ||
+  'secondary' ||
+  'tertiary' ||
+  'road' ||
+  'street' => 'Road',
+  'address' || 'house' => 'Address',
+  'mall' => 'Mall',
+  'shop' => 'Shop',
+  'fuel' => 'Fuel station',
+  'cafe' => 'Café',
+  'fast_food' => 'Fast food',
+  'place_of_worship' => 'Place of worship',
+  'car_repair' => 'Car repair',
+  'car_dealer' => 'Car dealer',
+  'attraction' => 'Sight',
+  _ =>
+    kind.isEmpty
+        ? 'Place'
+        : '${kind[0].toUpperCase()}${kind.substring(1).replaceAll('_', ' ')}',
+};

@@ -7,6 +7,7 @@ import '../models/app_settings.dart';
 import '../models/speed_point.dart';
 import '../utils/geo.dart';
 import 'api_client.dart';
+import 'slowdown_detector.dart';
 import 'storage.dart';
 
 /// What the sync service needs from the app (implemented by AppController).
@@ -91,8 +92,8 @@ class SyncService extends ChangeNotifier {
   DateTime? _lastFailure;
 
   /// Places downloaded by [browse] recently (not saved).
-  final List<({double lat, double lng, double radiusM, DateTime at})>
-  _browsed = [];
+  final List<({double lat, double lng, double radiusM, DateTime at})> _browsed =
+      [];
   Timer? _timer;
   Timer? _soon;
 
@@ -563,7 +564,9 @@ class SyncService extends ChangeNotifier {
     _browsed.removeWhere((a) => now.difference(a.at) > browseFreshFor);
     final cLat = _centerLat;
     final cLng = _centerLng;
-    if (cLat != null && cLng != null && inside(cLat, cLng, areaRadiusKm * 1000)) {
+    if (cLat != null &&
+        cLng != null &&
+        inside(cLat, cLng, areaRadiusKm * 1000)) {
       return true;
     }
     return _browsed.any((a) => inside(a.lat, a.lng, a.radiusM));
@@ -789,6 +792,23 @@ class SyncService extends ChangeNotifier {
         if (c.remoteId != id) c else if (visible) updated,
     ]);
     return visible ? updated : null;
+  }
+
+  /// The driver suddenly slowed down (see SlowdownDetector). Sent at once,
+  /// because it only matters now (dropped when offline). A police radar the
+  /// server found or kept there goes on this phone's map right away.
+  Future<void> reportSlowdown(Slowdown s) async {
+    if (!_started || _token == null) return;
+    await _locked(() async {
+      try {
+        final res = await api.slowdown(s.toJson());
+        if (res['radar'] case final Map<String, dynamic> radar) {
+          await _applyArea([radar], const []);
+        }
+      } catch (e) {
+        debugPrint('Could not send the slowdown: $e');
+      }
+    });
   }
 
   Future<void> report(SpeedPoint point, String reason, String? comment) =>

@@ -136,7 +136,7 @@ class VoicePlayer {
     final p = e.point;
     switch (e.kind) {
       case AlertEventKind.approach:
-        final limit = p.type == PointType.camera && p.speedLimit != null
+        final limit = p.type != PointType.bump && p.speedLimit != null
             ? ' Limit ${p.speedLimit}.'
             : '';
         _enqueue(

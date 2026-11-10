@@ -2,9 +2,41 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../models/speed_point.dart';
 import '../services/alert_engine.dart';
 import '../theme/app_theme.dart';
 import 'ui.dart';
+
+/// How sure the app is about a police radar, in a few words (one line on
+/// the warning card): "Confirmed by 3 drivers · 5 min ago", "4 drivers
+/// braked here · 12 min ago" (found automatically), "Reported 20 min ago ·
+/// not confirmed yet".
+String radarTrust(SpeedPoint point, [DateTime? now]) {
+  final at = point.lastConfirmedAt ?? point.createdAt;
+  final ago = at == null ? null : _ago((now ?? DateTime.now()).difference(at));
+  String drivers(int n) => n == 1 ? '1 driver' : '$n drivers';
+  if (point.confirms > 0) {
+    return ['Confirmed by ${drivers(point.confirms)}', ?ago].join(' · ');
+  }
+  if (point.auto) {
+    return [
+      point.slowdowns > 0
+          ? '${drivers(point.slowdowns)} braked here'
+          : 'Found automatically',
+      ?ago,
+    ].join(' · ');
+  }
+  return [
+    ago == null ? 'Reported' : 'Reported $ago',
+    'not confirmed yet',
+  ].join(' · ');
+}
+
+String _ago(Duration d) {
+  if (d.inMinutes < 1) return 'just now';
+  if (d.inMinutes < 60) return '${d.inMinutes} min ago';
+  return '${d.inHours} h ago';
+}
 
 /// Warning pill at the top of the map while a camera / bump is ahead
 /// (like an iPhone Live Activity).
@@ -95,8 +127,138 @@ class WarningBanner extends StatelessWidget {
                 color: over ? Colors.white : accent,
                 track: over ? Colors.white.withValues(alpha: 0.3) : p.fill,
               ),
+              if (point.type.temporary) ...[
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Icon(
+                      point.confirms > 0 || point.slowdowns >= 3
+                          ? Icons.verified_rounded
+                          : Icons.help_outline_rounded,
+                      size: 15,
+                      color: over ? Colors.white : p.textSecondary,
+                    ),
+                    const SizedBox(width: 5),
+                    Expanded(
+                      child: Text(
+                        radarTrust(point),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: over ? Colors.white : p.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// After driving past a police radar: "Still there?" with two big buttons.
+/// The answers keep the map accurate (it hides itself after a few seconds).
+class StillThereCard extends StatelessWidget {
+  const StillThereCard({
+    super.key,
+    required this.point,
+    required this.onAnswer,
+    required this.onClose,
+  });
+
+  final SpeedPoint point;
+  final ValueChanged<bool> onAnswer;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    Widget answer(bool yes) => Expanded(
+      child: SizedBox(
+        height: 52,
+        child: FilledButton.icon(
+          onPressed: () => onAnswer(yes),
+          style: FilledButton.styleFrom(
+            backgroundColor: yes ? p.success : p.danger,
+            foregroundColor: Colors.white,
+          ),
+          icon: Icon(yes ? Icons.check_rounded : Icons.close_rounded),
+          // Bigger than usual, keeping the app's font from the theme.
+          label: Text(
+            yes ? 'Still there' : 'Not there',
+            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+          ),
+        ),
+      ),
+    );
+
+    return Semantics(
+      liveRegion: true,
+      label: 'Police radar still there?',
+      child: Frosted(
+        radius: 30,
+        padding: const EdgeInsets.fromLTRB(12, 12, 8, 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                PointBadge(
+                  size: 44,
+                  color: p.colorFor(point.type),
+                  child: PointGlyph(
+                    type: point.type,
+                    size: 24,
+                    color: p.onColorFor(point.type),
+                  ),
+                ),
+                const SizedBox(width: Space.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Police radar still there?',
+                        style: TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w600,
+                          color: p.text,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        radarTrust(point),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 13, color: p.textSecondary),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Close',
+                  onPressed: onClose,
+                  icon: Icon(Icons.close_rounded, color: p.textSecondary),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: Row(
+                children: [
+                  answer(true),
+                  const SizedBox(width: Space.sm),
+                  answer(false),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );
