@@ -5,6 +5,7 @@ import '../app_controller.dart';
 import '../models/app_settings.dart';
 import '../models/custom_sound.dart';
 import '../models/speed_point.dart';
+import '../models/warning_tone.dart';
 import '../services/api_client.dart';
 import '../services/sound_resolver.dart';
 import '../theme/app_theme.dart';
@@ -138,6 +139,16 @@ class SettingsScreen extends StatelessWidget {
                       child: Text(
                         'Speed Alert 1.0',
                         style: TextStyle(color: p.textTertiary, fontSize: 13),
+                      ),
+                    ),
+                    const SizedBox(height: Space.xs),
+                    // Required by the OpenStreetMap license (ODbL) for the
+                    // imported cameras and bumps.
+                    Center(
+                      child: Text(
+                        'Camera and bump data © OpenStreetMap contributors',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: p.textTertiary, fontSize: 12),
                       ),
                     ),
                   ],
@@ -618,40 +629,68 @@ class _SoundsSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final s = app.settings;
     return _Group(
       title: 'Warning sounds',
       footer:
-          'Tap a warning to pick any sound file, or a video (only its sound '
-          'plays). Sounds stop after ${maxClipLength.inSeconds} seconds. '
-          'To give one place its own sound, tap that point on the map.',
+          'Tap a warning to choose a built-in sound, any sound file, or a '
+          'video (only its sound plays). Sounds stop after '
+          '${maxClipLength.inSeconds} seconds. To give one place its own '
+          'sound, tap that point on the map.',
       children: [
         _TypeSounds(app: app, type: PointType.camera),
         _TypeSounds(app: app, type: PointType.bump),
+        _SwitchRow(
+          icon: Icons.record_voice_over_rounded,
+          color: const Color(0xFF0EA5E9),
+          title: 'Say the distance too',
+          subtitle: 'After a built-in sound: "Speed camera in 300 meters"',
+          value: s.speakDistance,
+          onChanged: (v) => app.updateSettings(s.copyWith(speakDistance: v)),
+        ),
         _SlowDownSound(app: app),
       ],
     );
   }
 }
 
-/// Opens the sound picker and saves the result for [slot].
+/// Opens the sound picker and saves the result for [slot]. With [toneType],
+/// the picker also offers the built-in sounds for that warning type.
 Future<void> _changeSound(
   BuildContext context,
   AppController app, {
   required String slot,
   required String title,
   required String resetLabel,
+  PointType? toneType,
 }) async {
+  final s = app.settings;
+  final hasOwn = app.sounds.has(s.sounds[slot]);
+  final tone = toneType == null ? null : s.toneFor(toneType);
   final choice = await chooseSound(
     context,
     library: app.sounds,
     title: title,
-    resetLabel: app.settings.sounds.containsKey(slot) ? resetLabel : null,
+    resetLabel: s.sounds.containsKey(slot) ? resetLabel : null,
+    tones: toneType == null
+        ? null
+        : ToneOptions(
+            selected: hasOwn ? null : tone,
+            voiceSelected: !hasOwn && tone == null,
+            defaultTone: WarningTone.defaultFor(toneType),
+            onPlay: app.voice.previewTone,
+          ),
   );
   switch (choice) {
     case PickedSound(:final sound):
       await app.setSound(slot, sound);
     case ResetSound():
       await app.setSound(slot, null);
+    case ChosenTone(:final tone):
+      // A built-in sound replaces your own file for this warning type.
+      await app.updateSettings(
+        app.settings.withSound(slot, null).withTone(toneType!, tone),
+      );
     case null:
   }
 }
@@ -685,7 +724,9 @@ class _TypeSoundsState extends State<_TypeSounds> {
           distances.any(
             (d) => app.voice.hasRecording(SoundSlot.distance(type, d)),
           );
-      return builtIn ? 'Built-in recordings' : 'Phone voice';
+      return builtIn
+          ? 'Built-in recordings'
+          : describeTone(s.toneFor(type), speakDistance: s.speakDistance);
     }
 
     final perDistance = distances
@@ -714,7 +755,8 @@ class _TypeSoundsState extends State<_TypeSounds> {
             app,
             slot: slot,
             title: '${type.label} sound',
-            resetLabel: 'Use the default sound',
+            resetLabel: 'Remove my file',
+            toneType: type,
           ),
         ),
         RepeatRow(value: repeat, onChanged: (v) => app.setRepeat(slot, v!)),
@@ -1029,6 +1071,8 @@ class _AccountSection extends StatelessWidget {
     final sync = app.sync;
     return showDialog<void>(
       context: context,
+      // Tapping outside must not close it in the middle of signing in.
+      barrierDismissible: false,
       builder: (_) => _CredentialsDialog(
         register: register,
         email: sync.signedOutEmail,
@@ -1248,77 +1292,84 @@ class _CredentialsDialogState extends State<_CredentialsDialog> {
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
-    return AlertDialog(
-      title: Text(widget.register ? 'Back up with email' : 'Sign in'),
-      content: AutofillGroup(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              widget.register
-                  ? 'Your points and settings will be saved to this account.'
-                  : 'Points you added on this phone move into the account.',
-              style: TextStyle(fontSize: 14, color: p.textSecondary),
-            ),
-            const SizedBox(height: Space.lg),
-            TextField(
-              controller: _email,
-              enabled: !_busy,
-              keyboardType: TextInputType.emailAddress,
-              autocorrect: false,
-              autofillHints: const [AutofillHints.email],
-              textInputAction: TextInputAction.next,
-              decoration: const InputDecoration(hintText: 'Email'),
-            ),
-            const SizedBox(height: Space.sm),
-            TextField(
-              controller: _password,
-              enabled: !_busy,
-              obscureText: _hide,
-              autofillHints: [
+    // Fields with a visible box (the dialog and fields share a color).
+    final field = InputDecoration(filled: true, fillColor: p.fill);
+    return PopScope(
+      canPop: !_busy,
+      child: AlertDialog(
+        // Scrolls when the keyboard leaves little room (small phones).
+        scrollable: true,
+        title: Text(widget.register ? 'Back up with email' : 'Sign in'),
+        content: AutofillGroup(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
                 widget.register
-                    ? AutofillHints.newPassword
-                    : AutofillHints.password,
-              ],
-              onSubmitted: (_) => _submit(),
-              decoration: InputDecoration(
-                hintText: widget.register
-                    ? 'Password (at least 8 characters)'
-                    : 'Password',
-                suffixIcon: IconButton(
-                  tooltip: _hide ? 'Show password' : 'Hide password',
-                  onPressed: () => setState(() => _hide = !_hide),
-                  icon: Icon(
-                    _hide
-                        ? Icons.visibility_outlined
-                        : Icons.visibility_off_outlined,
+                    ? 'Your points and settings will be saved to this account.'
+                    : 'Points you added on this phone move into the account.',
+                style: TextStyle(fontSize: 14, color: p.textSecondary),
+              ),
+              const SizedBox(height: Space.lg),
+              TextField(
+                controller: _email,
+                enabled: !_busy,
+                keyboardType: TextInputType.emailAddress,
+                autocorrect: false,
+                autofillHints: const [AutofillHints.email],
+                textInputAction: TextInputAction.next,
+                decoration: field.copyWith(hintText: 'Email'),
+              ),
+              const SizedBox(height: Space.sm),
+              TextField(
+                controller: _password,
+                enabled: !_busy,
+                obscureText: _hide,
+                autofillHints: [
+                  widget.register
+                      ? AutofillHints.newPassword
+                      : AutofillHints.password,
+                ],
+                onSubmitted: (_) => _submit(),
+                decoration: field.copyWith(
+                  hintText: widget.register
+                      ? 'Password (at least 8 characters)'
+                      : 'Password',
+                  suffixIcon: IconButton(
+                    tooltip: _hide ? 'Show password' : 'Hide password',
+                    onPressed: () => setState(() => _hide = !_hide),
+                    icon: Icon(
+                      _hide
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                    ),
                   ),
                 ),
               ),
-            ),
-            if (_error != null) ...[
-              const SizedBox(height: Space.sm),
-              Text(_error!, style: TextStyle(color: p.danger, fontSize: 14)),
+              if (_error != null) ...[
+                const SizedBox(height: Space.sm),
+                Text(_error!, style: TextStyle(color: p.danger, fontSize: 14)),
+              ],
             ],
-          ],
+          ),
         ),
+        actions: [
+          TextButton(
+            onPressed: _busy ? null : () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: _busy ? null : _submit,
+            child: _busy
+                ? const SizedBox.square(
+                    dimension: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Text(widget.register ? 'Create account' : 'Sign in'),
+          ),
+        ],
       ),
-      actions: [
-        TextButton(
-          onPressed: _busy ? null : () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: _busy ? null : _submit,
-          child: _busy
-              ? const SizedBox.square(
-                  dimension: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : Text(widget.register ? 'Create account' : 'Sign in'),
-        ),
-      ],
     );
   }
 }

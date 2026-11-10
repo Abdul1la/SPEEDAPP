@@ -234,4 +234,61 @@ void main() {
       expect(bearingDegrees(33.3, 44.4, lat, lng), closeTo(45, 0.1));
     });
   });
+
+  test('a U-turn back to a two-way point warns again', () {
+    const bump = SpeedPoint(
+      id: 'b',
+      type: PointType.bump,
+      lat: 33.3,
+      lng: 44.4,
+    );
+    final engine = AlertEngine();
+    final there = drive(
+      engine,
+      [bump],
+      target: bump,
+      startBefore: 400,
+      endAfter: 250,
+    );
+    expect(approachDistances(there), [300, 100]);
+    final back = drive(
+      engine,
+      [bump],
+      target: bump,
+      bearing: 180,
+      startBefore: 250,
+      endAfter: 100,
+      start: DateTime(2026, 1, 1, 0, 5),
+    );
+    // Back inside the 300 m zone: warned again, then at 100 m.
+    expect(approachDistances(back), [300, 100]);
+  });
+
+  test('a U-turn back to a one-way point stays quiet (wrong direction)', () {
+    const camNorth = SpeedPoint(
+      id: 'n',
+      type: PointType.camera,
+      lat: 33.3,
+      lng: 44.4,
+      direction: 0,
+    );
+    final engine = AlertEngine();
+    drive(
+      engine,
+      [camNorth],
+      target: camNorth,
+      startBefore: 600,
+      endAfter: 300,
+    );
+    final back = drive(
+      engine,
+      [camNorth],
+      target: camNorth,
+      bearing: 180,
+      startBefore: 300,
+      endAfter: 100,
+      start: DateTime(2026, 1, 1, 0, 5),
+    );
+    expect(approachDistances(back), isEmpty);
+  });
 }

@@ -6,23 +6,33 @@ import 'package:geolocator/geolocator.dart';
 import '../models/speed_point.dart';
 import '../utils/geo.dart';
 import 'alert_engine.dart';
+import 'notification_permission.dart';
 
 enum LocationStatus { ok, serviceOff, denied, deniedForever }
 
 class LocationService {
-  Future<LocationStatus> ensurePermission() async {
+  /// Checks location access. With [ask], shows the system prompt when it
+  /// hasn't been decided yet; without, only checks (used when the app comes
+  /// back to the front, so a "Don't allow" isn't asked again at once).
+  Future<LocationStatus> ensurePermission({bool ask = true}) async {
     if (!await Geolocator.isLocationServiceEnabled()) {
       return LocationStatus.serviceOff;
     }
     var perm = await Geolocator.checkPermission();
-    if (perm == LocationPermission.denied) {
+    if (perm == LocationPermission.denied && ask) {
       perm = await Geolocator.requestPermission();
     }
-    return switch (perm) {
+    final status = switch (perm) {
       LocationPermission.denied => LocationStatus.denied,
       LocationPermission.deniedForever => LocationStatus.deniedForever,
       _ => LocationStatus.ok,
     };
+    // Android 13+: allow the "warnings are on" notification, which keeps
+    // the background GPS visible and running on long drives.
+    if (status == LocationStatus.ok && ask) {
+      await NotificationPermission.request();
+    }
+    return status;
   }
 
   Future<DriveSample?> lastKnown() async {

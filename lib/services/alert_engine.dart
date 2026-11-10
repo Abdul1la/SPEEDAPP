@@ -74,6 +74,9 @@ class _PointState {
   final Set<int> announced = {};
   double minDistance = double.infinity;
   bool passed = false;
+
+  /// Farthest we got after passing it (to notice a U-turn back to it).
+  double maxAfterPass = 0;
   DateTime? lastOverSpeed;
 }
 
@@ -149,8 +152,20 @@ class AlertEngine {
       if (d > range) continue;
 
       inRange.add(p.id);
-      final st = _states.putIfAbsent(p.id, _PointState.new);
-      if (st.passed) continue;
+      var st = _states.putIfAbsent(p.id, _PointState.new);
+      if (st.passed) {
+        // Turned around and coming back to it (a point for both ways, or
+        // for this direction): that's a new approach, warn again.
+        st.maxAfterPass = math.max(st.maxAfterPass, d);
+        final off = _offAngle(s, p, d);
+        final comingBack =
+            off != null &&
+            off <= aheadAngle &&
+            d < st.maxAfterPass - 2 * passedMargin &&
+            _directionMatches(p);
+        if (!comingBack) continue;
+        st = _states[p.id] = _PointState();
+      }
 
       final engaged = st.announced.isNotEmpty;
       final offAngle = _offAngle(s, p, d);

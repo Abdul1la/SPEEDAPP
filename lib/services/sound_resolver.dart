@@ -1,5 +1,6 @@
 import '../models/custom_sound.dart';
 import '../models/speed_point.dart';
+import '../models/warning_tone.dart';
 
 /// Names of the warning sounds. They match the built-in recordings in
 /// `assets/sounds/` (e.g. `camera_300.mp3`) and the keys of your own sounds
@@ -19,6 +20,15 @@ abstract final class SoundSlot {
     distance(t, meters),
     type(t),
   ];
+
+  /// The warning type of a slot ("camera_300" -> camera), or null for
+  /// [overSpeed].
+  static PointType? typeOf(String slot) {
+    for (final t in PointType.values) {
+      if (slot == t.key || slot.startsWith('${t.key}_')) return t;
+    }
+    return null;
+  }
 }
 
 /// Where a warning's sound comes from.
@@ -32,27 +42,35 @@ enum SoundOrigin {
   /// A recording shipped inside the app (`assets/sounds/`).
   builtIn,
 
+  /// The built-in warning sound chosen in Settings (Chime, Alert...).
+  tone,
+
   /// The phone's text-to-speech voice.
   phoneVoice,
 }
 
 class ResolvedSound {
-  const ResolvedSound(this.origin, {this.custom, this.asset});
+  const ResolvedSound(this.origin, {this.custom, this.asset, this.tone});
 
   final SoundOrigin origin;
 
   /// For [SoundOrigin.point] and [SoundOrigin.custom].
   final CustomSound? custom;
 
-  /// For [SoundOrigin.builtIn]: the asset path, e.g. `assets/sounds/camera.mp3`.
+  /// For [SoundOrigin.builtIn] and [SoundOrigin.tone]: the asset path,
+  /// e.g. `assets/sounds/camera.mp3`.
   final String? asset;
+
+  /// For [SoundOrigin.tone].
+  final WarningTone? tone;
 }
 
 /// Picks the sound for a warning, most specific first:
 ///  1. the point's own sound ([own]),
 ///  2. your sound for each slot in [slots] (e.g. camera_300, then camera),
 ///  3. a built-in recording for each slot,
-///  4. the phone voice.
+///  4. the built-in sound chosen in Settings ([tone]),
+///  5. the phone voice.
 /// Your sounds come before the built-in ones, so a sound you pick for
 /// "all speed cameras" is used even where the app has a recording for one
 /// distance. Missing files are skipped.
@@ -62,6 +80,7 @@ ResolvedSound resolveSound({
   required Map<String, CustomSound> userSounds,
   required bool Function(CustomSound sound) fileExists,
   required String? Function(String slot) assetFor,
+  WarningTone? tone,
 }) {
   if (own != null && fileExists(own)) {
     return ResolvedSound(SoundOrigin.point, custom: own);
@@ -75,6 +94,9 @@ ResolvedSound resolveSound({
   for (final slot in slots) {
     final a = assetFor(slot);
     if (a != null) return ResolvedSound(SoundOrigin.builtIn, asset: a);
+  }
+  if (tone != null) {
+    return ResolvedSound(SoundOrigin.tone, asset: tone.asset, tone: tone);
   }
   return const ResolvedSound(SoundOrigin.phoneVoice);
 }

@@ -297,7 +297,20 @@ export async function editPoint(
       cols.status = input.status;
       cols.status_reason = input.status === 'active' ? null : 'moderator';
     }
+    if (input.visibility === 'private' && row.visibility === 'public') cols.unshared_at = new Date();
     await updateColumns(conn, id, cols);
+    if (input.status === 'active') {
+      // Restored by a moderator: its open reports are answered, so the next
+      // vote doesn't hide it again.
+      await execute(
+        conn,
+        `UPDATE point_reports SET status = 'dismissed', resolved_by = ?, resolved_at = CURRENT_TIMESTAMP(3),
+                resolution_note = 'Point restored by a moderator'
+          WHERE point_id = ? AND status = 'open'`,
+        [actor.id, id],
+      );
+      await recountPoints(conn, [id]);
+    }
     await audit(conn, actor, 'point.edit', 'point', id, { changes: input });
     return adminPoint(conn, id);
   });
@@ -415,7 +428,29 @@ export async function banUser(
       );
       hidden = r.affectedRows;
     }
-    await audit(conn, actor, 'user.ban', 'user', id, { reason, hidePoints, hiddenPoints: hidden });
+    // Undo their votes and open reports, so a banned troll's "gone" votes and
+    // fake reports stop hiding other drivers' points.
+    const touched = await select<{ point_id: number }>(
+      conn,
+      `SELECT point_id FROM point_votes WHERE user_id = ?
+        UNION SELECT point_id FROM point_reports WHERE user_id = ? AND status = 'open'`,
+      [id, id],
+    );
+    await execute(conn, 'DELETE FROM point_votes WHERE user_id = ?', [id]);
+    await execute(
+      conn,
+      `UPDATE point_reports SET status = 'dismissed', resolved_by = ?, resolved_at = CURRENT_TIMESTAMP(3),
+              resolution_note = 'Reporter was banned'
+        WHERE user_id = ? AND status = 'open'`,
+      [actor.id, id],
+    );
+    await recountPoints(conn, touched.map((t) => t.point_id));
+    await audit(conn, actor, 'user.ban', 'user', id, {
+      reason,
+      hidePoints,
+      hiddenPoints: hidden,
+      undoneVotesAndReports: touched.length,
+    });
     return { user: await adminUser(conn, id), hiddenPoints: hidden };
   });
 }

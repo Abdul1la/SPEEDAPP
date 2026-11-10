@@ -86,16 +86,37 @@ String exportPoints(List<SpeedPoint> points) => const JsonEncoder.withIndent(
 ///  * JSON: `[{"type":"camera","lat":33.31,"lng":44.36,"limit":80}, ...]`
 ///  * CSV lines: `lat,lng,type,limit,direction` (type/limit/direction optional)
 ///    e.g. `33.3152,44.3661,camera,80`
+bool _validPlace(Object? lat, Object? lng) =>
+    lat is num && lng is num && lat.abs() <= 90 && lng.abs() <= 180;
+
+/// Drops values the app and server can't use (e.g. a limit of 2 km/h).
+SpeedPoint _clean(SpeedPoint p) {
+  final limit = p.speedLimit;
+  final dir = p.direction;
+  final note = p.note?.trim();
+  return p.copyWith(
+    speedLimit: () =>
+        limit != null && limit >= 5 && limit <= 300 ? limit : null,
+    direction: () => dir == null || !dir.isFinite ? null : dir % 360,
+    note: () => note == null || note.isEmpty
+        ? null
+        : note.length > maxNoteLength
+        ? note.substring(0, maxNoteLength)
+        : note,
+  );
+}
+
 List<SpeedPoint> parsePoints(String text) {
   final trimmed = text.trim();
   if (trimmed.isEmpty) return [];
   if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
     final decoded = jsonDecode(trimmed);
     final list = decoded is List ? decoded : [decoded];
-    return list
-        .whereType<Map<String, dynamic>>()
-        .map((m) => SpeedPoint.fromJson(m))
-        .toList();
+    return [
+      for (final m in list.whereType<Map<String, dynamic>>())
+        if (_validPlace(m['lat'], m['lng'] ?? m['lon'] ?? m['long']))
+          _clean(SpeedPoint.fromJson(m)),
+    ];
   }
 
   final out = <SpeedPoint>[];
@@ -107,15 +128,17 @@ List<SpeedPoint> parsePoints(String text) {
     if (lat == null || lng == null) continue; // header row or junk
     if (lat.abs() > 90 || lng.abs() > 180) continue;
     out.add(
-      SpeedPoint(
-        id: newPointId(),
-        type: PointType.fromKey(
-          cells.length > 2 ? cells[2].toLowerCase() : null,
+      _clean(
+        SpeedPoint(
+          id: newPointId(),
+          type: PointType.fromKey(
+            cells.length > 2 ? cells[2].toLowerCase() : null,
+          ),
+          lat: lat,
+          lng: lng,
+          speedLimit: cells.length > 3 ? int.tryParse(cells[3]) : null,
+          direction: cells.length > 4 ? double.tryParse(cells[4]) : null,
         ),
-        lat: lat,
-        lng: lng,
-        speedLimit: cells.length > 3 ? int.tryParse(cells[3]) : null,
-        direction: cells.length > 4 ? double.tryParse(cells[4]) : null,
       ),
     );
   }

@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart' show kTouchSlop;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -5,6 +6,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../app_controller.dart';
 import '../map/map_styles.dart';
 import '../map/marker_icons.dart';
+import '../models/app_settings.dart';
 import '../models/speed_point.dart';
 import '../services/location_service.dart';
 import '../theme/app_theme.dart';
@@ -47,6 +49,7 @@ class _MapScreenState extends State<MapScreen> {
 
   /// The middle of the map (where "Map center" puts a new point).
   LatLng? _mapCenter;
+  Offset? _pointerDown;
   final MarkerIcons _icons = MarkerIcons();
   bool _follow = true;
   bool _drawingIcons = false;
@@ -64,7 +67,9 @@ class _MapScreenState extends State<MapScreen> {
     // Coming back from the phone settings: try GPS again.
     _lifecycle = AppLifecycleListener(
       onResume: () {
-        if (app.locationStatus != LocationStatus.ok) app.startGps();
+        // Only check again: the permission prompt itself pauses and resumes
+        // the app, and asking again at once would be a loop on Android.
+        if (app.locationStatus != LocationStatus.ok) app.startGps(ask: false);
       },
     );
   }
@@ -146,7 +151,11 @@ class _MapScreenState extends State<MapScreen> {
     PointPlace place = PointPlace.mapSpot,
     bool fromLongPress = true,
   }) async {
-    final pos = app.position;
+    // Only a real GPS fix counts as "my location" (not a saved old one).
+    final pos = app.livePosition;
+    // A new point at my location while driving warns only in my direction;
+    // otherwise (parked, a spot on the map) it starts as "both ways".
+    final driving = (pos?.speedKmh ?? 0) > 10 && app.course != null;
     final result = await showPointEditor(
       context,
       app,
@@ -157,18 +166,32 @@ class _MapScreenState extends State<MapScreen> {
       place: place,
       fromLongPress: fromLongPress,
       myCourse: app.course,
+      presetDirection: driving && place == PointPlace.myLocation,
     );
     if (!mounted || result == null) return;
     switch (result.action) {
       case PointSheetAction.testDrive:
         final kmh = app.startSimulation(result.point);
         setState(() => _follow = true);
-        _toast('Test drive at ${kmh.round()} km/h — listen for the warnings');
+        final saved = existing == null
+            ? '${result.point.type.label} saved. '
+            : '';
+        _toast(
+          app.settings.muted
+              ? '${saved}Test drive at ${kmh.round()} km/h. Sound is muted: unmute to hear the warnings'
+              : '${saved}Test drive at ${kmh.round()} km/h. Listen for the warnings',
+        );
       case PointSheetAction.saved:
         _toast('${result.point.type.label} saved');
         if (existing == null) _showOnMap(result.point);
       case PointSheetAction.deleted:
-        _toast('${result.point.type.label} deleted');
+        _toast(
+          '${result.point.type.label} deleted',
+          action: SnackBarAction(
+            label: 'Undo',
+            onPressed: () => app.restorePoint(result.point),
+          ),
+        );
     }
   }
 
@@ -213,6 +236,7 @@ class _MapScreenState extends State<MapScreen> {
     final center =
         _mapCenter ??
         (pos != null ? LatLng(pos.lat, pos.lng) : _fallbackCamera.target);
+    _mapCenter = center;
     await _openEditor(
       at: center,
       place: PointPlace.myLocation,
@@ -224,9 +248,15 @@ class _MapScreenState extends State<MapScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final dark = Theme.of(context).brightness == Brightness.dark;
+    // Status bar icons sit on the map: light icons only on a dark map.
+    final brightness = Theme.of(context).brightness;
+    final darkMap = switch (app.settings.mapLook) {
+      MapLook.dark => true,
+      MapLook.auto => brightness == Brightness.dark,
+      MapLook.light || MapLook.standard => false,
+    };
     return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: dark ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark,
+      value: darkMap ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark,
       child: Scaffold(
         body: ListenableBuilder(
           listenable: app,
@@ -285,8 +315,13 @@ class _MapScreenState extends State<MapScreen> {
     };
 
     return Listener(
-      // Dragging the map stops "follow me" until the user taps it again.
-      onPointerMove: (_) {
+      // Dragging the map stops "follow me" until the user taps it again;
+      // the small wobble of tapping a pin doesn't.
+      onPointerDown: (e) => _pointerDown = e.position,
+      onPointerUp: (_) => _pointerDown = null,
+      onPointerMove: (e) {
+        final start = _pointerDown;
+        if (start == null || (e.position - start).distance < kTouchSlop) return;
         if (_follow) setState(() => _follow = false);
       },
       child: GoogleMap(
@@ -330,7 +365,9 @@ class _MapScreenState extends State<MapScreen> {
         alert: active,
         zone: app.settings.distancesFor(active.point.type).first,
       );
-    } else if (app.ready && app.locationStatus != LocationStatus.ok) {
+    } else if (app.ready &&
+        app.locationStatus != null &&
+        app.locationStatus != LocationStatus.ok) {
       card = _LocationProblem(key: const ValueKey('loc'), app: app);
     } else if (app.ready && app.mapPoints.isEmpty && !_hintDismissed) {
       card = _NoticeCard(
@@ -363,7 +400,7 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           )
-        : app.locationStatus == LocationStatus.ok && app.position == null
+        : app.locationStatus == LocationStatus.ok && app.livePosition == null
         ? StatusChip(color: p.warning, label: 'Finding GPS…')
         : null;
 

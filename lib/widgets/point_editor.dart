@@ -37,7 +37,9 @@ enum PointPlace {
 /// For a new point, [lat]/[lng] is a spot on the map and [myLocation] the
 /// GPS position (null while waiting for GPS). The form lets the driver
 /// choose between them, starting with [place]. [fromLongPress] names the
-/// map spot "Pressed spot" instead of "Map center".
+/// map spot "Pressed spot" instead of "Map center". With [presetDirection]
+/// (adding at my location while driving) a new point starts as "one way",
+/// in [myCourse]; otherwise "both ways".
 Future<PointSheetResult?> showPointEditor(
   BuildContext context,
   AppController app, {
@@ -49,6 +51,7 @@ Future<PointSheetResult?> showPointEditor(
   bool fromLongPress = true,
   PointType initialType = PointType.camera,
   double? myCourse,
+  bool presetDirection = false,
 }) {
   final mapSpot = lat != null && lng != null ? (lat: lat, lng: lng) : null;
   final start = place == PointPlace.myLocation && myLocation != null
@@ -65,7 +68,7 @@ Future<PointSheetResult?> showPointEditor(
         type: initialType,
         lat: at!.lat,
         lng: at.lng,
-        direction: myCourse,
+        direction: presetDirection ? myCourse : null,
         shared: app.settings.sharePoints,
       );
   return showAppSheet<PointSheetResult>(
@@ -113,11 +116,25 @@ class _PointEditorState extends State<_PointEditor> {
   /// Where a new point goes (ignored when editing).
   late PointPlace _place = widget.place;
 
+  /// My GPS position; filled in when the first fix arrives while open.
+  late LatLngPair? _gps = widget.myLocation;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.isNew && _gps == null) widget.app.addListener(_waitForGps);
+  }
+
+  void _waitForGps() {
+    final pos = widget.app.livePosition;
+    if (pos == null || !mounted) return;
+    widget.app.removeListener(_waitForGps);
+    setState(() => _gps = (lat: pos.lat, lng: pos.lng));
+  }
+
   LatLngPair get _location {
     if (widget.isNew) {
-      final spot = _place == PointPlace.myLocation
-          ? widget.myLocation
-          : widget.mapSpot;
+      final spot = _place == PointPlace.myLocation ? _gps : widget.mapSpot;
       if (spot != null) return spot;
     }
     return (lat: widget.initial.lat, lng: widget.initial.lng);
@@ -147,6 +164,7 @@ class _PointEditorState extends State<_PointEditor> {
 
   @override
   void dispose() {
+    widget.app.removeListener(_waitForGps);
     _note.dispose();
     super.dispose();
   }
@@ -183,12 +201,18 @@ class _PointEditorState extends State<_PointEditor> {
     final next = _live.myVote == vote ? null : vote;
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
+    final route = ModalRoute.of(context);
     setState(() => _voting = true);
     try {
       final updated = await widget.app.vote(_live, next);
       if (!mounted) return;
       if (updated == null) {
-        navigator.pop();
+        // Close this sheet only (not something opened on top of it).
+        if (route != null && route.isCurrent) {
+          navigator.pop();
+        } else if (route != null) {
+          navigator.removeRoute(route);
+        }
         messenger.showSnackBar(
           const SnackBar(
             content: Text(
@@ -308,7 +332,7 @@ class _PointEditorState extends State<_PointEditor> {
               ),
               const SizedBox(height: Space.xs),
               TextButton.icon(
-                onPressed: _report,
+                onPressed: _voting ? null : _report,
                 icon: const Icon(Icons.flag_outlined, size: 20),
                 label: const Text('Report a problem'),
               ),
@@ -322,20 +346,19 @@ class _PointEditorState extends State<_PointEditor> {
   /// "My location" or a spot on the map, for a new point.
   Widget _buildPlace(BuildContext context) {
     final p = context.palette;
-    final hasGps = widget.myLocation != null;
+    final hasGps = _gps != null;
     final hasSpot = widget.mapSpot != null;
     final spotLabel = widget.fromLongPress ? 'Pressed spot' : 'Map center';
+    final spot = widget.fromLongPress
+        ? 'The spot you long-pressed on the map.'
+        : 'The middle of the map when you tapped Add.';
     final String hint;
     if (_place == PointPlace.myLocation) {
-      hint = 'Your GPS position right now.';
+      hint = 'Your GPS position.';
     } else if (!hasGps) {
-      hint = widget.fromLongPress
-          ? 'The spot you long-pressed. My location: waiting for GPS…'
-          : 'The middle of the map. My location: waiting for GPS…';
+      hint = '$spot My location: waiting for GPS…';
     } else {
-      hint = widget.fromLongPress
-          ? 'The spot you long-pressed on the map.'
-          : 'The middle of the map. Move the map to change it.';
+      hint = spot;
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -408,7 +431,8 @@ class _PointEditorState extends State<_PointEditor> {
         setState(() => _sound = sound);
       case ResetSound():
         setState(() => _sound = null);
-      case null:
+      // Built-in sounds are chosen in Settings, not per point.
+      case ChosenTone() || null:
     }
   }
 
@@ -589,6 +613,16 @@ class _PointEditorState extends State<_PointEditor> {
               const SectionLabel('Note'),
               TextField(
                 controller: _note,
+                maxLength: maxNoteLength,
+                buildCounter:
+                    (
+                      context, {
+                      required currentLength,
+                      required isFocused,
+                      maxLength,
+                    }) => currentLength > maxNoteLength - 40
+                    ? Text('$currentLength / $maxLength')
+                    : null,
                 textCapitalization: TextCapitalization.sentences,
                 decoration: const InputDecoration(
                   hintText: 'Optional, e.g. after the bridge',

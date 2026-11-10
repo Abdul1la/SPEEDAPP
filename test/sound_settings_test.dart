@@ -1,9 +1,11 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:new_project/models/app_settings.dart';
 import 'package:new_project/models/custom_sound.dart';
 import 'package:new_project/models/speed_point.dart';
+import 'package:new_project/models/warning_tone.dart';
 import 'package:new_project/services/storage.dart';
 
 const clip = CustomSound(
@@ -74,6 +76,58 @@ void main() {
       expect(s.sounds.keys, ['bump']);
       expect(s.repeatFor('camera'), 1);
       expect(s.repeatFor('bump'), maxRepeat);
+    });
+  });
+
+  group('Built-in sounds', () {
+    test('default: Chime for cameras, Bump-bump for bumps, then the voice', () {
+      const s = AppSettings();
+      expect(s.toneFor(PointType.camera), WarningTone.chime);
+      expect(s.toneFor(PointType.bump), WarningTone.bump);
+      expect(s.speakDistance, isTrue);
+    });
+
+    test('choose a sound, or the phone voice only', () {
+      final s = const AppSettings()
+          .withTone(PointType.camera, WarningTone.alert)
+          .withTone(PointType.bump, null);
+      expect(s.toneFor(PointType.camera), WarningTone.alert);
+      expect(s.toneFor(PointType.bump), isNull);
+    });
+
+    test('saved, loaded and backed up to the account', () {
+      final s = const AppSettings()
+          .withTone(PointType.camera, WarningTone.radar)
+          .withTone(PointType.bump, null)
+          .copyWith(speakDistance: false);
+      final back = roundTrip(s);
+      expect(back.toneFor(PointType.camera), WarningTone.radar);
+      expect(back.toneFor(PointType.bump), isNull);
+      expect(back.speakDistance, isFalse);
+
+      final restored = const AppSettings().restoredFrom(
+        jsonDecode(jsonEncode(s.toBackupJson())) as Map<String, dynamic>,
+      );
+      expect(restored.toneFor(PointType.camera), WarningTone.radar);
+      expect(restored.speakDistance, isFalse);
+    });
+
+    test('unknown saved sounds fall back to the default', () {
+      final s = AppSettings.fromJson({
+        'tones': {'camera': 'trumpet', 'bump': 42},
+        'speakDistance': 'yes',
+      });
+      expect(s.toneFor(PointType.camera), WarningTone.chime);
+      expect(s.toneFor(PointType.bump), WarningTone.bump);
+      expect(s.speakDistance, isTrue);
+    });
+
+    test('every built-in sound file is in the app', () {
+      final pubspec = File('pubspec.yaml').readAsStringSync();
+      expect(pubspec, contains('- assets/sounds/tones/'));
+      for (final t in WarningTone.values) {
+        expect(File(t.asset).existsSync(), isTrue, reason: t.asset);
+      }
     });
   });
 

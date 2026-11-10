@@ -1,5 +1,6 @@
 import 'custom_sound.dart';
 import 'speed_point.dart';
+import 'warning_tone.dart';
 
 enum MapLook {
   /// Light by day, dark by night (follows the phone's appearance).
@@ -23,6 +24,8 @@ class AppSettings {
     this.sounds = const {},
     this.repeats = const {},
     this.sharePoints = true,
+    this.tones = const {},
+    this.speakDistance = true,
   });
 
   /// Distances in meters at which a warning is spoken, for each type.
@@ -49,7 +52,27 @@ class AppSettings {
   /// made private in its editor).
   final bool sharePoints;
 
+  /// Built-in sound for each warning type ("camera", "bump"): a
+  /// [WarningTone] key, or [phoneVoiceTone] for the phone voice only.
+  /// Missing means the type's default ([WarningTone.defaultFor]).
+  final Map<String, String> tones;
+
+  /// After a built-in sound, the phone voice says the distance (and the
+  /// speed limit), e.g. "Speed camera in 300 meters. Limit 80."
+  final bool speakDistance;
+
   int repeatFor(String group) => (repeats[group] ?? 1).clamp(1, maxRepeat);
+
+  /// The built-in sound for [type], or null for the phone voice only.
+  WarningTone? toneFor(PointType type) {
+    final key = tones[type.key];
+    if (key == phoneVoiceTone) return null;
+    return WarningTone.fromKey(key) ?? WarningTone.defaultFor(type);
+  }
+
+  /// Sets the built-in sound for [type] (null: the phone voice only).
+  AppSettings withTone(PointType type, WarningTone? tone) =>
+      copyWith(tones: {...tones, type.key: tone?.key ?? phoneVoiceTone});
 
   /// Sets (or with null, removes) your sound for one slot.
   AppSettings withSound(String slot, CustomSound? sound) {
@@ -84,6 +107,8 @@ class AppSettings {
     Map<String, CustomSound>? sounds,
     Map<String, int>? repeats,
     bool? sharePoints,
+    Map<String, String>? tones,
+    bool? speakDistance,
   }) {
     return AppSettings(
       cameraDistances: cameraDistances ?? this.cameraDistances,
@@ -95,30 +120,39 @@ class AppSettings {
       sounds: sounds ?? this.sounds,
       repeats: repeats ?? this.repeats,
       sharePoints: sharePoints ?? this.sharePoints,
+      tones: tones ?? this.tones,
+      speakDistance: speakDistance ?? this.speakDistance,
     );
   }
 
   Map<String, dynamic> toJson() => {
     ...toBackupJson(),
+    'muted': muted,
     'sounds': {for (final e in sounds.entries) e.key: e.value.toJson()},
   };
 
   /// What is backed up to the account. Sound files stay on the phone, so
-  /// their settings aren't included.
+  /// their settings aren't included, and neither is mute (a new phone
+  /// should never start silent).
   Map<String, dynamic> toBackupJson() => {
     'cameraDistances': cameraDistances,
     'bumpDistances': bumpDistances,
     'overSpeedTolerance': overSpeedTolerance,
-    'muted': muted,
     'keepScreenOn': keepScreenOn,
     'mapLook': mapLook.name,
     'repeats': repeats,
     'sharePoints': sharePoints,
+    // Built-in sounds come with every copy of the app, so they are backed up.
+    'tones': tones,
+    'speakDistance': speakDistance,
   };
 
   /// Settings restored from a backup, keeping this phone's own sounds.
-  AppSettings restoredFrom(Map<String, dynamic> backup) =>
-      AppSettings.fromJson({...backup, 'sounds': toJson()['sounds']});
+  AppSettings restoredFrom(Map<String, dynamic> backup) => AppSettings.fromJson({
+    ...backup,
+    'muted': muted,
+    'sounds': toJson()['sounds'],
+  });
 
   factory AppSettings.fromJson(Map<String, dynamic> json) {
     const d = AppSettings();
@@ -147,9 +181,26 @@ class AppSettings {
       }
     }
 
+    final tones = <String, String>{};
+    if (json['tones'] case final Map<dynamic, dynamic> m) {
+      for (final e in m.entries) {
+        final v = e.value;
+        if (e.key is String &&
+            v is String &&
+            (v == phoneVoiceTone || WarningTone.fromKey(v) != null)) {
+          tones[e.key as String] = v;
+        }
+      }
+    }
+
     return AppSettings(
       sounds: sounds,
       repeats: repeats,
+      tones: tones,
+      speakDistance: switch (json['speakDistance']) {
+        final bool v => v,
+        _ => d.speakDistance,
+      },
       cameraDistances: ints(json['cameraDistances'], d.cameraDistances),
       bumpDistances: ints(json['bumpDistances'], d.bumpDistances),
       overSpeedTolerance:

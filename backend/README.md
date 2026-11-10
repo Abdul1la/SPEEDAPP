@@ -34,6 +34,37 @@ npm test
 npm run typecheck
 ```
 
+## Load the cameras and bumps of a country (OpenStreetMap)
+
+```sh
+npm run import-osm -- --dry-run     # Iraq (IQ): only shows what would change
+npm run import-osm                  # adds / updates them
+npm run import-osm -- --prune       # also removes points deleted from OSM
+npm run import-osm -- --country JO  # another country (ISO code)
+```
+
+It downloads every speed camera (`highway=speed_camera`, plus traffic
+cameras on poles) and every speed bump (`traffic_calming=bump`, `hump`,
+`cushion`, `table`...) from OpenStreetMap and adds them as community points
+(`source = 'import'`, `client_id = 'osm:IQ:node/123'`). Run it again any
+time (for example monthly): points imported before are updated, not
+duplicated; points a driver already added are skipped; points that drivers
+voted away or a moderator hid stay hidden.
+
+- **Direction:** a camera on a one-way road gets that road's direction of
+  travel. Otherwise OSM's `direction` tag is used; in Iraq it is the way the
+  camera *looks* (it faces the traffic), so the travel direction is the
+  opposite. The script checks this against the one-way roads and prints
+  what it found.
+- **Speed limit:** the camera's `maxspeed`, or the road's.
+- **Public servers are often busy**: the script retries and tries other
+  servers. `--save x.json` keeps the download, `--file x.json` reuses it.
+- **License:** OpenStreetMap data is © OpenStreetMap contributors, under the
+  [ODbL](https://www.openstreetmap.org/copyright). The app credits it in
+  Settings; keep that credit.
+
+On the server: `docker compose exec api node src/scripts/import-osm.ts`.
+
 ## Put it online
 
 The simplest way is one small Linux server (VPS) with Docker:

@@ -46,6 +46,11 @@ class AppController extends ChangeNotifier implements SyncHost {
 
   AppSettings _settings = const AppSettings();
   DriveSample? _position;
+
+  /// The position came from the GPS now (not a saved one from before).
+  bool _liveFix = false;
+  DriveSample? _lastRealPosition;
+  bool _lastRealLive = false;
   ActiveAlert? _active;
   Upcoming? _next;
   LocationStatus? _locationStatus;
@@ -76,6 +81,10 @@ class AppController extends ChangeNotifier implements SyncHost {
   @override
   AppSettings get settings => _settings;
   DriveSample? get position => _position;
+
+  /// The driver's position from the GPS right now, or null while waiting
+  /// for a fix (an old saved position is not "my location").
+  DriveSample? get livePosition => _liveFix && !isSimulating ? _position : null;
   ActiveAlert? get active => _active;
 
   /// Next camera / bump further up the road (within 10 km).
@@ -107,14 +116,23 @@ class AppController extends ChangeNotifier implements SyncHost {
     await startGps();
   }
 
-  Future<void> startGps() async {
-    _locationStatus = await _location.ensurePermission();
+  /// Starts the GPS. [ask] shows the permission prompt if needed (only
+  /// when the driver asked for it, or on first start).
+  Future<void> startGps({bool ask = true}) async {
+    _locationStatus = await _location.ensurePermission(ask: ask);
     notifyListeners();
     if (_locationStatus != LocationStatus.ok) return;
     await _gpsSub?.cancel();
     _gpsSub = _location.gps().listen(
       (s) {
-        if (!isSimulating) _onSample(s);
+        if (isSimulating) {
+          // Remember it for when the test drive ends.
+          _lastRealPosition = s;
+          _lastRealLive = true;
+          return;
+        }
+        _liveFix = true;
+        _onSample(s);
       },
       onError: (Object e) {
         debugPrint('GPS error: $e');
@@ -154,17 +172,38 @@ class AppController extends ChangeNotifier implements SyncHost {
     sync.localChange();
   }
 
-  /// Saves a changed point. For a community point only the phone's own
-  /// settings (sound, repeat) are kept; the rest belongs to its owner.
+  /// Saves a changed point. Only the fields a driver can change are taken
+  /// from [p]; its server id and vote counts stay as they are now (a sync
+  /// may have updated them while the editor was open). For a community
+  /// point only this phone's sound and repeat change.
   Future<void> updatePoint(SpeedPoint p) async {
     if (p.community) {
-      _community = [for (final x in _community) x.id == p.id ? p : x];
+      _community = [
+        for (final x in _community)
+          x.id == p.id
+              ? x.copyWith(sound: () => p.sound, repeat: () => p.repeat)
+              : x,
+      ];
       _pointsChanged();
       await _storage.saveCommunity(_community);
       return;
     }
     _points = [
-      for (final x in _points) x.id == p.id ? p.copyWith(dirty: true) : x,
+      for (final x in _points)
+        x.id == p.id
+            ? x.copyWith(
+                type: p.type,
+                lat: p.lat,
+                lng: p.lng,
+                speedLimit: () => p.speedLimit,
+                direction: () => p.direction,
+                note: () => p.note,
+                sound: () => p.sound,
+                repeat: () => p.repeat,
+                shared: p.shared,
+                dirty: true,
+              )
+            : x,
     ];
     _pointsChanged();
     await _storage.savePoints(_points);
@@ -193,7 +232,12 @@ class AppController extends ChangeNotifier implements SyncHost {
       );
       if (dup) continue;
       // A fresh copy: the list may come from another phone or account.
-      added.add(p.asNewLocal(newPointId()));
+      // Shared only if the driver shares new points.
+      added.add(
+        p
+            .asNewLocal(newPointId())
+            .copyWith(shared: p.shared && _settings.sharePoints),
+      );
     }
     if (added.isNotEmpty) {
       _points = [..._points, ...added];
@@ -213,6 +257,22 @@ class AppController extends ChangeNotifier implements SyncHost {
     _pointsChanged();
     await _storage.savePoints(_points);
     remote.forEach(sync.queueDelete);
+  }
+
+  /// Undo of [deletePoint]: puts the point back.
+  Future<void> restorePoint(SpeedPoint p) async {
+    if (_points.any((x) => x.id == p.id)) return;
+    final remoteId = p.remoteId;
+    // Still on the server if the delete hadn't been sent; otherwise it is
+    // uploaded again as a new point.
+    final kept = remoteId != null && sync.cancelDelete(remoteId);
+    _points = [
+      ..._points,
+      kept ? p : p.copyWith(remoteId: () => null, dirty: true),
+    ];
+    _pointsChanged();
+    await _storage.savePoints(_points);
+    if (!kept) sync.localChange();
   }
 
   // ---- Community --------------------------------------------------------
@@ -305,6 +365,8 @@ class AppController extends ChangeNotifier implements SyncHost {
   /// Drives 20 km/h over the limit so the "slow down" warning plays too.
   double startSimulation(SpeedPoint p) {
     stopSimulation();
+    _lastRealPosition = _position;
+    _lastRealLive = _liveFix;
     final kmh = ((p.speedLimit ?? 60) + 20).toDouble();
     _engine.reset();
     _simulating = p;
@@ -324,6 +386,9 @@ class AppController extends ChangeNotifier implements SyncHost {
     _active = null;
     _next = null;
     _engine.reset();
+    // Back to the real position (not the last pretend one).
+    _position = _lastRealPosition;
+    _liveFix = _lastRealLive;
     notifyListeners();
   }
 
