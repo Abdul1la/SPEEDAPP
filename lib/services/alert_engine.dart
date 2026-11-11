@@ -114,6 +114,11 @@ class AlertEngine {
   /// Inside this range the bearing to the point is too noisy to trust.
   static const double closeRange = 40;
 
+  /// Slower than this (km/h: standing still, parked, crawling in traffic)
+  /// no warning is spoken. The warning isn't lost: once faster, the one
+  /// for where we are now plays.
+  static const double minWarnSpeedKmh = 10;
+
   static const Duration overSpeedRepeat = Duration(seconds: 10);
   static const double _minSpeedForGpsHeading = 1.5; // m/s
   static const double _courseFixDistance = 15; // m
@@ -141,6 +146,7 @@ class AlertEngine {
     _updateCourse(s);
 
     final events = <AlertEvent>[];
+    final moving = s.speedKmh >= minWarnSpeedKmh;
     final inRange = <String>{};
     SpeedPoint? bestPoint;
     double bestDistance = double.infinity;
@@ -193,11 +199,15 @@ class AlertEngine {
       final crossed = thresholds.where((t) => d <= t).toList();
       if (crossed.isEmpty) continue;
 
-      final nearest = crossed.last; // thresholds are sorted far -> near
-      if (!st.announced.contains(nearest)) {
-        events.add(AlertEvent(AlertEventKind.approach, p, distance: nearest));
+      // Too slow: say nothing and don't mark it said, so it still plays
+      // when we drive off.
+      if (moving) {
+        final nearest = crossed.last; // thresholds are sorted far -> near
+        if (!st.announced.contains(nearest)) {
+          events.add(AlertEvent(AlertEventKind.approach, p, distance: nearest));
+        }
+        st.announced.addAll(crossed);
       }
-      st.announced.addAll(crossed);
 
       if (d < bestDistance) {
         bestDistance = d;

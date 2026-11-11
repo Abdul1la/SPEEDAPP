@@ -153,8 +153,9 @@ void main() {
     final events = <AlertEvent>[];
     for (double m = 0; m <= 1100; m += 16) {
       final (lat, lng) = destinationPoint(sLat, sLng, 0, m);
+      // Speed (from how far we moved) but no heading.
       events.addAll(
-        engine.update(DriveSample(lat: lat, lng: lng, speedMps: 0, time: t), [
+        engine.update(DriveSample(lat: lat, lng: lng, speedMps: 16, time: t), [
           camera,
         ], settings).events,
       );
@@ -290,5 +291,64 @@ void main() {
       start: DateTime(2026, 1, 1, 0, 5),
     );
     expect(approachDistances(back), isEmpty);
+  });
+
+  group('no sound below 10 km/h', () {
+    /// One reading [m] meters south of the camera, heading north.
+    AlertResult at(AlertEngine engine, double m, double kmh, DateTime t) {
+      final (lat, lng) = destinationPoint(camera.lat, camera.lng, 180, m);
+      return engine.update(
+        DriveSample(
+          lat: lat,
+          lng: lng,
+          speedMps: kmh / 3.6,
+          heading: kmh > 0 ? 0 : null,
+          time: t,
+          stationary: kmh == 0,
+        ),
+        [camera],
+        settings,
+      );
+    }
+
+    test('standing still near a camera says nothing, the banner stays', () {
+      final engine = AlertEngine();
+      var t = DateTime(2026, 1, 1);
+      final events = <AlertEvent>[];
+      AlertResult? last;
+      for (var i = 0; i < 30; i++) {
+        last = at(engine, 60, 0, t);
+        events.addAll(last.events);
+        t = t.add(const Duration(seconds: 1));
+      }
+      expect(events, isEmpty);
+      expect(last!.active?.point.id, 'cam');
+    });
+
+    test('crawling at 8 km/h says nothing; driving off warns', () {
+      final engine = AlertEngine();
+      var t = DateTime(2026, 1, 1);
+      final slow = <AlertEvent>[];
+      var m = 600.0;
+      for (; m > 150; m -= 8 / 3.6) {
+        slow.addAll(at(engine, m, 8, t).events);
+        t = t.add(const Duration(seconds: 1));
+      }
+      expect(slow, isEmpty);
+      // Traffic clears at 150 m: the 200 m warning (where we are now),
+      // then 100 m. Nothing missed, nothing repeated.
+      final fast = <AlertEvent>[];
+      for (; m > 50; m -= 40 / 3.6) {
+        fast.addAll(at(engine, m, 40, t).events);
+        t = t.add(const Duration(seconds: 1));
+      }
+      expect(approachDistances(fast), [200, 100]);
+    });
+
+    test('exactly 10 km/h warns', () {
+      final engine = AlertEngine();
+      final r = at(engine, 250, 10, DateTime(2026, 1, 1));
+      expect(approachDistances(r.events), [300]);
+    });
   });
 }
