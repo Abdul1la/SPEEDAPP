@@ -40,7 +40,7 @@ class AppController extends ChangeNotifier implements SyncHost {
   final VoicePlayer voice;
   final AlertEngine _engine = AlertEngine();
 
-  /// Online backup, community map, votes and reports.
+  /// Online backup, community map and votes.
   late final SyncService sync;
 
   /// Points I added (synced to my account).
@@ -422,9 +422,6 @@ class AppController extends ChangeNotifier implements SyncHost {
   /// "Still there" / "Gone" on another driver's point (null takes it back).
   /// Returns the updated point, or null when it is now hidden.
   Future<SpeedPoint?> vote(SpeedPoint p, String? vote) => sync.vote(p, vote);
-
-  Future<void> report(SpeedPoint p, String reason, String? comment) =>
-      sync.report(p, reason, comment);
 
   // ---- SyncHost ---------------------------------------------------------
 

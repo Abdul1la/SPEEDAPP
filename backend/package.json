@@ -2,7 +2,7 @@
   "name": "speed-alert-backend",
   "version": "1.0.0",
   "private": true,
-  "description": "API server and MySQL database for the Speed Alert app: community map, votes, reports, backup and admin moderation.",
+  "description": "API server and MySQL database for the Speed Alert app: community map, votes, police radar and backup.",
   "type": "module",
   "engines": {
     "node": ">=22.18"
@@ -11,14 +11,12 @@
     "start": "node src/server.ts",
     "dev": "node --watch --env-file-if-exists=.env src/server.ts",
     "migrate": "node --env-file-if-exists=.env src/scripts/migrate.ts",
-    "create-admin": "node --env-file-if-exists=.env src/scripts/create-admin.ts",
     "import-osm": "node --env-file-if-exists=.env src/scripts/import-osm.ts",
     "test": "node --env-file-if-exists=.env --test --test-concurrency=1 \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@fastify/rate-limit": "^11.2.2",
-    "@fastify/static": "^10.1.10",
     "fastify": "^5.12.8",
     "mysql2": "^3.24.6"
   },

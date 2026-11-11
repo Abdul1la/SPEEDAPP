@@ -55,7 +55,6 @@ async function mustGetUser(db: Queryable, id: number): Promise<UserRow> {
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const STAFF_SESSION_DAYS = 30;
 
 function cleanEmail(email: string): string {
   const e = email.trim().toLowerCase();
@@ -142,7 +141,6 @@ export async function login(
   db: Db,
   current: AuthUser | null,
   input: { email: string; password: string; deviceName?: string | null },
-  sessionDays: number | null = null,
 ): Promise<Signed & { merged: number }> {
   const email = input.email.trim().toLowerCase();
   const row = await selectOne<{
@@ -150,8 +148,7 @@ export async function login(
     password_hash: string | null;
     status: string;
     ban_reason: string | null;
-    role: Role;
-  }>(db, 'SELECT id, password_hash, status, ban_reason, role FROM users WHERE email = ?', [email]);
+  }>(db, 'SELECT id, password_hash, status, ban_reason FROM users WHERE email = ?', [email]);
   const ok = await verifyPassword(input.password, row?.password_hash ?? dummyPasswordHash);
   if (!row || !ok) {
     throw new ApiError(401, 'invalid_login', 'Wrong email or password.');
@@ -164,9 +161,7 @@ export async function login(
     if (current?.isAnonymous && current.id !== row.id) {
       merged = await mergeInto(conn, current.id, row.id);
     }
-    // Staff sign-ins (moderation rights) always expire, at most after 30 days.
-    const days = row.role === 'user' ? sessionDays : Math.min(sessionDays ?? STAFF_SESSION_DAYS, STAFF_SESSION_DAYS);
-    const token = await createSession(conn, row.id, input.deviceName ?? null, days);
+    const token = await createSession(conn, row.id, input.deviceName ?? null);
     return { token, user: toApiUser(await mustGetUser(conn, row.id)), merged };
   });
 }

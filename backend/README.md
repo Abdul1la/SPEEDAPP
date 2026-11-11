@@ -3,9 +3,10 @@
 Node.js (TypeScript, Fastify) API + MySQL 8.4 database for the Speed Alert app.
 
 - **Community map**: points one driver adds are downloaded by every driver nearby.
-- **Confirm / report**: "Still there" / "Gone" votes; wrong points hide themselves.
+- **Still there / Gone**: drivers' votes; wrong points hide themselves.
 - **Backup & sync**: points and settings are saved to an account and come back on a new phone.
-- **Admin moderation**: a web panel at `/admin` to review reports, edit points and ban users.
+- **No admin**: there is no admin panel. The map looks after itself through
+  drivers' votes (see Community rules).
 
 ## Run it locally
 
@@ -20,12 +21,6 @@ npm run dev                   # API on http://localhost:3000 (restarts on change
 ```
 
 The database tables are created automatically on start (`migrations/`).
-
-Make yourself an admin, then open <http://localhost:3000/admin>:
-
-```sh
-npm run create-admin -- you@example.com "a long password"
-```
 
 Run the tests (they use the separate `speedalert_test` database, never your data):
 
@@ -49,7 +44,7 @@ cameras on poles) and every speed bump (`traffic_calming=bump`, `hump`,
 (`source = 'import'`, `client_id = 'osm:IQ:node/123'`). Run it again any
 time (for example monthly): points imported before are updated, not
 duplicated; points a driver already added are skipped; points that drivers
-voted away or a moderator hid stay hidden.
+voted away stay hidden.
 
 - **Direction:** a camera on a one-way road gets that road's direction of
   travel. Otherwise OSM's `direction` tag is used; in Iraq it is the way the
@@ -73,7 +68,6 @@ The simplest way is one small Linux server (VPS) with Docker:
 git clone … && cd backend
 cp .env.example .env    # set strong MYSQL_ROOT_PASSWORD and MYSQL_PASSWORD
 docker compose up -d --build
-docker compose exec api node src/scripts/create-admin.ts you@example.com "a long password"
 ```
 
 Then put HTTPS in front of port 3000 (for example [Caddy](https://caddyserver.com):
@@ -136,13 +130,13 @@ Google Cloud Billing.
 
 | Table | What it holds |
 |---|---|
-| `users` | Drivers (anonymous or with email + password) and staff (`role`: user / moderator / admin; `status`: active / banned). |
+| `users` | Drivers (anonymous or with email + password). `status` active / banned (banned only by hand in the database). `role` is no longer used. |
 | `sessions` | Sign-in tokens (only a SHA-256 hash is stored). One per phone. |
-| `points` | Cameras and bumps. `location` is a `POINT SRID 4326` calculated from `lat`/`lng` with a **spatial index** for fast "near me" queries. `visibility` public/private, `status` active/hidden/removed, vote and report counters. |
+| `points` | Cameras and bumps. `location` is a `POINT SRID 4326` calculated from `lat`/`lng` with a **spatial index** for fast "near me" queries. `visibility` public/private, `status` active/hidden/removed, vote counters. |
 | `point_votes` | One "confirm" or "gone" vote per driver per point. |
-| `point_reports` | Reports (fake, wrong place, wrong details, duplicate, other) for the moderation queue. |
+| `point_reports` | Old "Report a problem" reports. No longer used (kept so old data isn't lost). |
 | `user_settings` | Each driver's app settings (JSON). |
-| `audit_log` | Every moderator / admin action. |
+| `audit_log` | Old admin actions. No longer used. |
 | `schema_migrations` | Which files in `migrations/` were applied. |
 
 To change the database, add a new file such as `migrations/002_add_something.sql`.
@@ -155,8 +149,6 @@ It runs once, on the next start (or `npm run migrate`). Never edit a migration t
   of a duplicate.
 - **3 "gone" votes**, more than its confirmations + 1, hide a point. Enough new
   confirmations bring it back.
-- **3 open reports** from different drivers hide a point until a moderator
-  reviews it.
 - An owner deleting a point that others confirmed doesn't delete it for them:
   it becomes a community point and the owner's delete counts as "gone".
 - Each driver can add at most `MAX_POINTS_PER_DAY` points a day (default 100).
@@ -211,7 +203,6 @@ All requests and responses are JSON. Send the token from sign-in as
 | PUT | `/v1/points/:id/vote` | `{ vote: "confirm" \| "gone" }` |
 | POST | `/v1/slowdowns` | `{ lat, lng, heading?, speedBefore, speedMin }` (km/h). Returns `{ counted, radar }` (see Police radar). |
 | DELETE | `/v1/points/:id/vote` | Take back your vote. |
-| POST | `/v1/points/:id/reports` | `{ reason: "fake" \| "wrong_place" \| "wrong_details" \| "duplicate" \| "other", comment? }` |
 
 A point: `{ id, type, lat, lng, speedLimit, direction, note, visibility, status,
 confirmCount, goneCount, lastConfirmedAt, mine, myVote, clientId (owner only), createdAt, updatedAt }`.
@@ -233,24 +224,14 @@ confirmCount, goneCount, lastConfirmedAt, mine, myVote, clientId (owner only), c
 | GET / PUT | `/v1/me/settings` | `{ settings: {...} }`, up to 16 KB. |
 | DELETE | `/v1/me` | Deletes the account. Private points are deleted; public ones stay for other drivers. |
 
-### Moderation (moderator or admin)
-
-`GET /v1/admin/stats`, `GET /v1/admin/reports?status=open`,
-`POST /v1/admin/reports/:id/resolve { action: dismiss | keep_point | hide_point | remove_point, note? }`,
-`GET /v1/admin/points?status&reported&q&ownerId`, `GET|PATCH /v1/admin/points/:id`,
-`GET /v1/admin/users?q&status&role`, `GET /v1/admin/users/:id`,
-`POST /v1/admin/users/:id/ban { reason?, hidePoints? }`, `POST /v1/admin/users/:id/unban`,
-`PATCH /v1/admin/users/:id { role }` (admin only), `GET /v1/admin/audit`.
-
 ## Code map
 
 | Path | What |
 |---|---|
 | `migrations/` | Database tables (SQL). |
 | `src/server.ts` | Starts the server. |
-| `src/app.ts` | Routes, error format, rate limits, admin panel. |
+| `src/app.ts` | Routes, error format, rate limits. |
 | `src/routes/` | HTTP endpoints and input validation. |
-| `src/services/` | The rules: `points.ts`, `users.ts`, `admin.ts`. |
-| `src/auth/` | Tokens, passwords (scrypt), roles. |
-| `admin/` | The admin web panel (plain HTML/JS). |
+| `src/services/` | The rules: `points.ts`, `users.ts`. |
+| `src/auth/` | Tokens and passwords (scrypt). |
 | `test/` | API tests against a real MySQL. |
