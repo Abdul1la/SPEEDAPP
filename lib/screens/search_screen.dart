@@ -38,7 +38,7 @@ class SearchScreen extends StatefulWidget {
 
 class _SearchScreenState extends State<SearchScreen> {
   static const _maxRecent = 8;
-  static const _debounce = Duration(milliseconds: 350);
+  static const _debounce = Duration(milliseconds: 250);
 
   final _query = TextEditingController();
   late final Storage _storage = widget.storage ?? Storage();
@@ -48,6 +48,9 @@ class _SearchScreenState extends State<SearchScreen> {
   String? _error;
   Timer? _timer;
   int _request = 0;
+
+  /// Results already found while typing: shown again at once (typing back).
+  final Map<String, List<Place>> _cache = {};
 
   /// The place being looked up after a tap (Google results), if any.
   String? _resolving;
@@ -86,6 +89,16 @@ class _SearchScreenState extends State<SearchScreen> {
       });
       return;
     }
+    final cached = _cache[q.toLowerCase()];
+    if (cached != null) {
+      _request++; // a search still running is out of date
+      setState(() {
+        _results = cached;
+        _loading = false;
+        _error = cached.isEmpty ? 'Nothing found for "$q".' : null;
+      });
+      return;
+    }
     setState(() => _loading = true);
     _timer = Timer(_debounce, () => _search(q));
   }
@@ -94,6 +107,7 @@ class _SearchScreenState extends State<SearchScreen> {
     final id = ++_request;
     try {
       final found = await widget.app.searchPlaces(q, session: _session);
+      _cache[q.toLowerCase()] = found;
       if (!mounted || id != _request) return; // a newer search is running
       setState(() {
         _results = found;
@@ -330,9 +344,9 @@ class _PlaceRow extends StatelessWidget {
                       color: p.text,
                     ),
                   ),
-                  if (place.address.isNotEmpty)
+                  if (details(place).isNotEmpty)
                     Text(
-                      place.address,
+                      details(place),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(fontSize: 13, color: p.textSecondary),
@@ -412,6 +426,12 @@ class _Hint extends StatelessWidget {
 }
 
 /// An icon for a kind of place (city, road, mall, fuel station...).
+/// "Restaurant · Bahdinan Quarter, Duhok": what it is, then where.
+String details(Place place) => [
+  placeKindLabel(place.kind),
+  if (place.address.isNotEmpty) place.address,
+].join(' · ');
+
 IconData placeIcon(String kind) => switch (kind) {
   'city' ||
   'town' ||
