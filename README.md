@@ -24,13 +24,12 @@ Without any setup, the phone's voice says each warning. To change it, use
 recordings inside the app instead, put them in `assets/sounds/`; the file
 names are listed in [assets/sounds/README.md](assets/sounds/README.md).
 
-### 3. Backend (community map, backup, moderation)
+### 3. Backend (community map, backup)
 The server is in [backend/](backend/README.md) (Node.js + MySQL). To run it on
 this computer:
 ```sh
 cd backend && cp .env.example .env && npm install
 docker compose up -d db && npm run dev      # http://localhost:3000
-npm run create-admin -- you@example.com "a long password"   # admin panel: /admin
 ```
 The app works without it (everything is saved on the phone first and
 uploaded when the server is reachable).
@@ -47,14 +46,12 @@ flutter build apk --dart-define=API_URL=https://api.yourdomain.com   # release
   per point with *Share with other drivers*, or for all new points in
   Settings → Account & sync). Points from other drivers download for about
   30 km around you and keep working offline.
-- **Still there / Gone:** tap another driver's point to vote or *Report a
-  problem*. Three "gone" votes take it off the map; reports go to the
-  moderators.
+- **Still there / Gone:** tap another driver's point to vote. Three "gone"
+  votes take it off the map; enough "still there" votes bring it back. There
+  is no admin: the map looks after itself.
 - **Backup:** Settings → Account & sync → *Back up with email*. On a new phone,
   *I already have an account* brings back your points and settings (sound
   files stay on the old phone).
-- **Moderation:** sign in at `http://<server>/admin` with an account made by
-  `npm run create-admin`.
 
 ## How to use
 - **Long-press the map** → add a camera or bump at that spot (type, speed
@@ -113,7 +110,7 @@ Only lat and lng are required. JSON from *Export* also works.
 | `lib/services/alert_engine.dart` | Decides when to warn (tested in `test/alert_engine_test.dart`) |
 | `lib/services/sync_service.dart` | Uploads my points and settings, downloads the community map, sign in / out (tested in `test/sync_service_test.dart`) |
 | `lib/services/api_client.dart` | Talks to the backend (`API_URL`) |
-| `backend/` | Node.js + MySQL server and admin panel ([backend/README.md](backend/README.md)) |
+| `backend/` | Node.js + MySQL server ([backend/README.md](backend/README.md)) |
 | `lib/services/voice_player.dart` | Plays the warnings one at a time (your sounds, recordings or phone voice), with repeats |
 | `lib/services/sound_resolver.dart` | Decides which sound a warning uses (tested in `test/sound_resolver_test.dart`) |
 | `lib/services/sound_library.dart` | Picks sound / video files and keeps copies inside the app |

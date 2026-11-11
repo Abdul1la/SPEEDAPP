@@ -46,26 +46,12 @@ export function authRoutes({ db }: Deps): FastifyPluginAsync {
       },
     );
 
-    // Sign in on a phone (or the admin panel). An anonymous driver's points
-    // on this phone are moved into the account.
-    app.post<{
-      Body: { email: string; password: string; deviceName?: string | null };
-      Querystring: { panel?: boolean };
-    }>(
+    // Sign in on a phone. An anonymous driver's points on this phone are
+    // moved into the account.
+    app.post<{ Body: { email: string; password: string; deviceName?: string | null } }>(
       '/login',
-      {
-        config: strict,
-        schema: {
-          body: credentialsBody,
-          querystring: { type: 'object', properties: { panel: { type: 'boolean' } } },
-        },
-        preHandler: optionalUser(db),
-      },
-      async (request) => {
-        // Admin panel sessions expire after 7 days; phone sessions don't.
-        const days = request.query.panel ? 7 : null;
-        return users.login(db, request.user, request.body, days);
-      },
+      { config: strict, schema: { body: credentialsBody }, preHandler: optionalUser(db) },
+      async (request) => users.login(db, request.user, request.body),
     );
 
     app.post('/logout', { preHandler: requireUser(db) }, async (request, reply) => {

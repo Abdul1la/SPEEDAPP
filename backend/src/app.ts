@@ -1,7 +1,4 @@
-import { fileURLToPath } from 'node:url';
-
 import rateLimit from '@fastify/rate-limit';
-import fastifyStatic from '@fastify/static';
 import Fastify from 'fastify';
 import type { FastifyError, FastifyInstance, FastifyServerOptions } from 'fastify';
 
@@ -11,7 +8,6 @@ import type { Db } from './db.ts';
 import { ApiError } from './lib/errors.ts';
 import { geoProvider } from './services/geo.ts';
 import type { GeoProvider } from './services/geo.ts';
-import { adminRoutes } from './routes/admin.ts';
 import { authRoutes } from './routes/auth.ts';
 import { geoRoutes } from './routes/geo.ts';
 import { meRoutes } from './routes/me.ts';
@@ -25,7 +21,6 @@ export interface Deps {
   geo?: GeoProvider;
 }
 
-const ADMIN_DIR = fileURLToPath(new URL('../admin/', import.meta.url));
 const TOKEN_HEADER = /^Bearer sa_[A-Za-z0-9_-]{43}$/;
 
 /** Builds the HTTP API (without listening), so tests can call it directly. */
@@ -92,23 +87,7 @@ export async function buildApp(
   await app.register(pointRoutes(deps), { prefix: '/v1/points' });
   await app.register(slowdownRoutes(deps), { prefix: '/v1/slowdowns' });
   await app.register(meRoutes(deps), { prefix: '/v1/me' });
-  await app.register(adminRoutes(deps), { prefix: '/v1/admin' });
   await app.register(geoRoutes(deps, deps.geo ?? geoProvider(deps.config)), { prefix: '/v1' });
-
-  // Admin panel (static page that uses /v1/admin).
-  await app.register(fastifyStatic, {
-    root: ADMIN_DIR,
-    prefix: '/admin/',
-    setHeaders: (res) => {
-      res.header(
-        'Content-Security-Policy',
-        "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-      );
-      res.header('X-Content-Type-Options', 'nosniff');
-      res.header('Referrer-Policy', 'no-referrer');
-    },
-  });
-  app.get('/admin', (_request, reply) => reply.redirect('/admin/'));
 
   return app;
 }
