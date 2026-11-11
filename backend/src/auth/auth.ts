@@ -107,24 +107,6 @@ export function optionalUser(db: Db) {
   };
 }
 
-const RANK: Record<Role, number> = { user: 0, moderator: 1, admin: 2 };
-
-export function hasRole(user: AuthUser, role: Role): boolean {
-  return RANK[user.role] >= RANK[role];
-}
-
-/** Route hook: signed in with at least [role]. */
-export function requireRole(db: Db, role: Role) {
-  return async (request: FastifyRequest, _reply: FastifyReply) => {
-    const user = await userFromRequest(db, request);
-    if (!user) throw unauthorized();
-    if (!hasRole(user, role)) {
-      throw forbidden('forbidden', 'You are not allowed to do this.');
-    }
-    request.user = user;
-  };
-}
-
 /** Creates a login session and returns its token (shown only this once). */
 export async function createSession(
   db: Queryable,

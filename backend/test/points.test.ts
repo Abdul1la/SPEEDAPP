@@ -186,30 +186,11 @@ test('enough "gone" votes hide a point; confirmations bring it back', async () =
   assert.equal(removedVote.body.point.confirmCount, 1);
 });
 
-test('you cannot vote on or report your own point', async () => {
+test('you cannot vote on your own point', async () => {
   const owner = await anonymous(ctx.app);
   const p = (await addPoint(ctx.app, owner)).body.point;
   const v = await call(ctx.app, 'PUT', `/v1/points/${p.id}/vote`, { token: owner, body: { vote: 'confirm' } });
   assert.equal(v.body.error.code, 'own_point');
-  const r = await call(ctx.app, 'POST', `/v1/points/${p.id}/reports`, { token: owner, body: { reason: 'fake' } });
-  assert.equal(r.body.error.code, 'own_point');
-});
-
-test('reports: one per driver, three hide the point until reviewed', async () => {
-  const owner = await anonymous(ctx.app);
-  const p = (await addPoint(ctx.app, owner)).body.point;
-  const reporters = await Promise.all(Array.from({ length: 3 }, () => anonymous(ctx.app)));
-  const report = (token: string) =>
-    call(ctx.app, 'POST', `/v1/points/${p.id}/reports`, { token, body: { reason: 'fake', comment: 'no camera here' } });
-
-  assert.equal((await report(reporters[0]!)).status, 201);
-  const twice = await report(reporters[0]!);
-  assert.equal(twice.status, 409);
-  assert.equal(twice.body.error.code, 'already_reported');
-  await report(reporters[1]!);
-  assert.equal((await call(ctx.app, 'GET', `/v1/points/${p.id}`, { token: owner })).status, 200);
-  await report(reporters[2]!);
-  assert.equal((await call(ctx.app, 'GET', `/v1/points/${p.id}`, { token: owner })).status, 404);
 });
 
 test('my points include private and hidden ones, not deleted ones', async () => {

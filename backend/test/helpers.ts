@@ -4,7 +4,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { buildApp } from '../src/app.ts';
 import type { Config } from '../src/config.ts';
-import { createPool, execute, select } from '../src/db.ts';
+import { createPool, select } from '../src/db.ts';
 import type { Db } from '../src/db.ts';
 import { runMigrations } from '../src/migrate.ts';
 
@@ -143,16 +143,6 @@ export async function registered(
   const res = await call(app, 'POST', '/v1/auth/register', { body: { email, password } });
   if (res.status !== 201) throw new Error(`register failed: ${JSON.stringify(res.body)}`);
   return { token: res.body.token, email, id: res.body.user.id };
-}
-
-/** A registered user with a staff role; returns their token and id. */
-export async function staff(
-  ctx: TestContext,
-  role: 'moderator' | 'admin',
-): Promise<{ token: string; id: string }> {
-  const user = await registered(ctx.app);
-  await execute(ctx.db, 'UPDATE users SET role = ? WHERE id = ?', [role, Number(user.id)]);
-  return { token: user.token, id: user.id };
 }
 
 export const BAGHDAD = { lat: 33.3152, lng: 44.3661 };

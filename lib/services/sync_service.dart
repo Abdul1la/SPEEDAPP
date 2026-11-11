@@ -400,7 +400,7 @@ class SyncService extends ChangeNotifier {
           break;
         }
         if (remoteId != null && e.status == 404) {
-          // Removed by a moderator: keep it on this phone only.
+          // Gone from the server: keep it on this phone only.
           await _updateMine(
             sent.id,
             (now) => now.copyWith(remoteId: () => null, dirty: false),
@@ -632,7 +632,7 @@ class SyncService extends ChangeNotifier {
     }
     for (final id in removed) {
       community.remove(id);
-      // Deleted on my other phone, or removed by a moderator.
+      // Deleted on my other phone, or taken off by drivers' votes.
       final localId = mineByRemote[id];
       final local = localId == null ? null : mine[localId];
       if (local != null && !local.dirty) {
@@ -810,10 +810,4 @@ class SyncService extends ChangeNotifier {
       }
     });
   }
-
-  Future<void> report(SpeedPoint point, String reason, String? comment) =>
-      _locked(() async {
-        await _ensureAccount();
-        await api.report(point.remoteId!, reason, comment);
-      });
 }

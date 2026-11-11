@@ -155,7 +155,7 @@ class _PointEditorState extends State<_PointEditor> {
   /// Shown to other drivers (own points).
   late bool _shared = widget.initial.shared;
 
-  /// Another driver's point: only votes, reports and the sound can change.
+  /// Another driver's point: only votes and the sound can change.
   bool get _community => widget.initial.community;
 
   /// The community point with its latest vote counts.
@@ -244,23 +244,6 @@ class _PointEditorState extends State<_PointEditor> {
     }
   }
 
-  Future<void> _report() async {
-    final result = await showAppSheet<(String, String?)>(
-      context: context,
-      isScrollControlled: true,
-      builder: (_) => const _ReportSheet(),
-    );
-    if (result == null || !mounted) return;
-    try {
-      await widget.app.report(_live, result.$1, result.$2);
-      if (mounted) {
-        await _showError('Thanks! A moderator will check this point.');
-      }
-    } on ApiException catch (e) {
-      if (mounted) await _showError(e.message);
-    }
-  }
-
   Widget _buildCommunity(BuildContext context) {
     final p = context.palette;
     final pt = _live;
@@ -343,12 +326,6 @@ class _PointEditorState extends State<_PointEditor> {
                     ),
                   ),
                 ],
-              ),
-              const SizedBox(height: Space.xs),
-              TextButton.icon(
-                onPressed: _voting ? null : _report,
-                icon: const Icon(Icons.flag_outlined, size: 20),
-                label: const Text('Report a problem'),
               ),
             ],
           ),
@@ -985,98 +962,5 @@ class _VoteButton extends StatelessWidget {
             icon: Icon(icon),
             label: text,
           );
-  }
-}
-
-/// Asks what is wrong with a point. Returns (reason, comment).
-class _ReportSheet extends StatefulWidget {
-  const _ReportSheet();
-
-  @override
-  State<_ReportSheet> createState() => _ReportSheetState();
-}
-
-class _ReportSheetState extends State<_ReportSheet> {
-  static const _reasons = [
-    ('fake', 'It never existed (fake)'),
-    ('wrong_place', 'It is in the wrong place'),
-    ('wrong_details', 'Wrong speed limit or details'),
-    ('duplicate', 'Another point is the same one'),
-    ('other', 'Something else'),
-  ];
-
-  String? _reason;
-  final _comment = TextEditingController();
-
-  @override
-  void dispose() {
-    _comment.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final p = context.palette;
-    return Padding(
-      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(Space.xl, 0, Space.xl, Space.xl),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SheetHeader(
-              title: 'Report a problem',
-              subtitle: 'If it is simply gone, use "Gone" instead.',
-              onClose: () => Navigator.pop(context),
-            ),
-            const SizedBox(height: Space.lg),
-            AppCard(
-              child: RadioGroup<String>(
-                groupValue: _reason,
-                onChanged: (v) => setState(() => _reason = v),
-                child: Column(
-                  children: [
-                    for (final (value, label) in _reasons)
-                      RadioListTile<String>(value: value, title: Text(label)),
-                  ],
-                ),
-              ),
-            ),
-            const SectionLabel('Details (optional)'),
-            TextField(
-              controller: _comment,
-              maxLength: 500,
-              maxLines: 3,
-              minLines: 1,
-              textCapitalization: TextCapitalization.sentences,
-              decoration: const InputDecoration(
-                hintText: 'e.g. the camera was moved 200 m north',
-              ),
-            ),
-            const SizedBox(height: Space.lg),
-            FilledButton(
-              onPressed: _reason == null
-                  ? null
-                  : () => Navigator.pop(context, (
-                      _reason!,
-                      _comment.text.trim().isEmpty
-                          ? null
-                          : _comment.text.trim(),
-                    )),
-              child: const Text('Send report'),
-            ),
-            if (_reason == null) ...[
-              const SizedBox(height: Space.sm),
-              Text(
-                'Choose what is wrong.',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 13, color: p.textTertiary),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
   }
 }

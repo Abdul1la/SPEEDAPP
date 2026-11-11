@@ -10,7 +10,6 @@ import {
   nearbyUrl,
   north,
   registered,
-  staff,
   testConfig,
   useTestApp,
   BAGHDAD,
@@ -80,61 +79,6 @@ test('the owner cannot take away a point other drivers confirmed', async () => {
   assert.equal(near.status, 200);
 });
 
-test('reports only hide a point when they outnumber its confirmations', async () => {
-  const owner = await anonymous(ctx.app);
-  const p = (await addPoint(ctx.app, owner)).body.point;
-  for (let i = 0; i < 3; i++) {
-    const t = await anonymous(ctx.app);
-    await call(ctx.app, 'PUT', `/v1/points/${p.id}/vote`, { token: t, body: { vote: 'confirm' } });
-  }
-  for (let i = 0; i < 3; i++) {
-    const t = await anonymous(ctx.app);
-    await call(ctx.app, 'POST', `/v1/points/${p.id}/reports`, { token: t, body: { reason: 'fake' } });
-  }
-  assert.equal((await call(ctx.app, 'GET', `/v1/points/${p.id}`, { token: owner })).status, 200);
-  const t = await anonymous(ctx.app);
-  await call(ctx.app, 'POST', `/v1/points/${p.id}/reports`, { token: t, body: { reason: 'fake' } });
-  assert.equal((await call(ctx.app, 'GET', `/v1/points/${p.id}`, { token: owner })).status, 404);
-});
-
-test('a point hidden by reports comes back when the reports are dismissed', async () => {
-  const mod = await staff(ctx, 'moderator');
-  const owner = await anonymous(ctx.app);
-  const p = (await addPoint(ctx.app, owner)).body.point;
-  for (let i = 0; i < 3; i++) {
-    const t = await anonymous(ctx.app);
-    await call(ctx.app, 'POST', `/v1/points/${p.id}/reports`, { token: t, body: { reason: 'fake' } });
-  }
-  const queue = await call(ctx.app, 'GET', '/v1/admin/reports', { token: mod.token });
-  assert.equal(queue.body.reports[0].point.status, 'hidden');
-  for (const r of queue.body.reports) {
-    await call(ctx.app, 'POST', `/v1/admin/reports/${r.id}/resolve`, { token: mod.token, body: { action: 'dismiss' } });
-  }
-  assert.equal((await call(ctx.app, 'GET', `/v1/points/${p.id}`, { token: owner })).body.point.status, 'active');
-});
-
-test('a moderator restoring a point also closes its open reports', async () => {
-  const mod = await staff(ctx, 'moderator');
-  const owner = await anonymous(ctx.app);
-  const p = (await addPoint(ctx.app, owner)).body.point;
-  const t = await anonymous(ctx.app);
-  await call(ctx.app, 'POST', `/v1/points/${p.id}/reports`, { token: t, body: { reason: 'fake' } });
-  await call(ctx.app, 'PATCH', `/v1/admin/points/${p.id}`, { token: mod.token, body: { status: 'hidden' } });
-  const res = await call(ctx.app, 'PATCH', `/v1/admin/points/${p.id}`, { token: mod.token, body: { status: 'active' } });
-  assert.equal(res.body.point.status, 'active');
-  assert.equal(res.body.point.reportCount, 0);
-});
-
-test('moderator-hidden points cannot be voted on', async () => {
-  const mod = await staff(ctx, 'moderator');
-  const owner = await anonymous(ctx.app);
-  const p = (await addPoint(ctx.app, owner, { note: 'secret note' })).body.point;
-  await call(ctx.app, 'PATCH', `/v1/admin/points/${p.id}`, { token: mod.token, body: { status: 'hidden' } });
-  const t = await anonymous(ctx.app);
-  const v = await call(ctx.app, 'PUT', `/v1/points/${p.id}/vote`, { token: t, body: { vote: 'confirm' } });
-  assert.equal(v.status, 404);
-});
-
 test('adding a camera hidden by "gone" votes brings it back instead of duplicating', async () => {
   const owner = await anonymous(ctx.app);
   const p = (await addPoint(ctx.app, owner)).body.point;
@@ -152,34 +96,14 @@ test('adding a camera hidden by "gone" votes brings it back instead of duplicati
   assert.equal((await call(ctx.app, 'GET', `/v1/points/${p.id}`, { token: owner })).body.point.status, 'active');
 });
 
-test("banning a troll undoes their votes and reports", async () => {
-  const mod = await staff(ctx, 'moderator');
-  const owner = await anonymous(ctx.app);
-  const p = (await addPoint(ctx.app, owner)).body.point;
-  const troll = await registered(ctx.app);
-  await call(ctx.app, 'PUT', `/v1/points/${p.id}/vote`, { token: troll.token, body: { vote: 'gone' } });
-  const q = (await addPoint(ctx.app, owner, { type: 'bump' })).body.point;
-  await call(ctx.app, 'POST', `/v1/points/${q.id}/reports`, { token: troll.token, body: { reason: 'fake' } });
-
-  const ban = await call(ctx.app, 'POST', `/v1/admin/users/${troll.id}/ban`, { token: mod.token, body: { reason: 'troll' } });
-  assert.equal(ban.status, 200);
-  const after = await call(ctx.app, 'GET', `/v1/points/${p.id}`, { token: owner });
-  assert.equal(after.body.point.goneCount, 0);
-  const reports = await call(ctx.app, 'GET', '/v1/admin/reports', { token: mod.token });
-  assert.equal(reports.body.reports.length, 0);
-});
-
-test('staff sign-ins expire even when the client does not ask', async () => {
-  const admin = await staff(ctx, 'admin');
-  const email = (await call(ctx.app, 'GET', '/v1/me', { token: admin.token })).body.user.email;
-  const login = await call(ctx.app, 'POST', '/v1/auth/login', { body: { email, password: 'correct horse' } });
-  assert.equal(login.status, 200);
-  const rows = await select<{ expires_at: Date | null }>(
-    ctx.db,
-    'SELECT expires_at FROM sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1',
-    [Number(admin.id)],
-  );
-  assert.ok(rows[0]?.expires_at, 'staff session must have an expiry');
+test('there is no admin panel, admin API or report button any more', async () => {
+  const t = await anonymous(ctx.app);
+  const p = (await addPoint(ctx.app, await anonymous(ctx.app))).body.point;
+  assert.equal((await call(ctx.app, 'GET', '/admin')).status, 404);
+  assert.equal((await call(ctx.app, 'GET', '/admin/')).status, 404);
+  assert.equal((await call(ctx.app, 'GET', '/v1/admin/stats', { token: t })).status, 404);
+  const report = await call(ctx.app, 'POST', `/v1/points/${p.id}/reports`, { token: t, body: { reason: 'fake' } });
+  assert.equal(report.status, 404);
 });
 
 test('confirming again refreshes "last confirmed"', async () => {

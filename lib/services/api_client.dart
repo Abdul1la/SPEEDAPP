@@ -168,12 +168,6 @@ class ApiClient {
   Future<Map<String, dynamic>> slowdown(Map<String, dynamic> body) =>
       _send('POST', '/v1/slowdowns', body: body);
 
-  Future<void> report(String id, String reason, String? comment) => _send(
-    'POST',
-    '/v1/points/$id/reports',
-    body: {'reason': reason, 'comment': comment},
-  );
-
   Future<List<Map<String, dynamic>>> myPoints() async {
     final json = await _send('GET', '/v1/me/points');
     return (json['points'] as List).cast<Map<String, dynamic>>();

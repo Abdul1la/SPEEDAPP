@@ -4,7 +4,7 @@ import { requireUser } from '../auth/auth.ts';
 import type { Deps } from '../app.ts';
 import { badRequest } from '../lib/errors.ts';
 import * as points from '../services/points.ts';
-import type { PointInput, PointType, ReportReason, Vote } from '../services/points.ts';
+import type { PointInput, PointType, Vote } from '../services/points.ts';
 import { createPointBody, idParams, updatePointBody } from './schemas.ts';
 
 type IdParams = { id: string };
@@ -87,34 +87,5 @@ export function pointRoutes({ db, config }: Deps): FastifyPluginAsync {
     app.delete<{ Params: IdParams }>('/:id/vote', { schema: { params: idParams } }, async (request) => ({
       point: await points.unvotePoint(db, request.user!, Number(request.params.id)),
     }));
-
-    app.post<{ Params: IdParams; Body: { reason: ReportReason; comment?: string | null } }>(
-      '/:id/reports',
-      {
-        config: { rateLimit: { max: 30, timeWindow: '1 hour' } },
-        schema: {
-          params: idParams,
-          body: {
-            type: 'object',
-            required: ['reason'],
-            additionalProperties: false,
-            properties: {
-              reason: { type: 'string', enum: ['fake', 'wrong_place', 'wrong_details', 'duplicate', 'other'] },
-              comment: { type: ['string', 'null'], maxLength: 500 },
-            },
-          },
-        },
-      },
-      async (request, reply) => {
-        const result = await points.reportPoint(
-          db,
-          request.user!,
-          Number(request.params.id),
-          request.body.reason,
-          request.body.comment ?? null,
-        );
-        return reply.code(201).send(result);
-      },
-    );
   };
 }

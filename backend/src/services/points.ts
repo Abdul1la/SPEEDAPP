@@ -1,7 +1,7 @@
 import type { AuthUser } from '../auth/auth.ts';
 import { execute, select, selectOne, transaction } from '../db.ts';
 import type { Db, Queryable } from '../db.ts';
-import { badRequest, conflict, forbidden, notFound, tooMany } from '../lib/errors.ts';
+import { badRequest, forbidden, notFound, tooMany } from '../lib/errors.ts';
 import { GEOM, angleDifference, boxWkt, distanceMeters, pointWkt } from '../lib/geo.ts';
 
 /** 'mobile': police radar (a mobile speed camera or a police car with one),
@@ -11,7 +11,6 @@ export type Visibility = 'public' | 'private';
 export type PointStatus = 'active' | 'hidden' | 'removed';
 export type StatusReason = 'votes' | 'reports' | 'moderator' | 'owner';
 export type Vote = 'confirm' | 'gone';
-export type ReportReason = 'fake' | 'wrong_place' | 'wrong_details' | 'duplicate' | 'other';
 
 /** The community rules, in one place. */
 export const RULES = {
@@ -21,10 +20,6 @@ export const RULES = {
   mergeAngle: 45,
   /** "Gone" votes needed to hide a point (and more than its confirmations + 1). */
   goneVotesToHide: 3,
-  /** Open reports from different drivers that hide a point until reviewed
-   * (and more reports than confirmations, so a few accounts can't wipe
-   * well-confirmed points). */
-  reportsToHide: 3,
   /** A point other drivers confirmed can't be moved further than this by its owner. */
   maxOwnerMoveM: 200,
   maxRadiusM: 100_000,
@@ -61,7 +56,6 @@ export interface PointRow {
   expires_at: Date | null;
   confirm_count: number;
   gone_count: number;
-  report_count: number;
   last_confirmed_at: Date | null;
   created_by: number | null;
   client_id: string | null;
@@ -103,7 +97,7 @@ export interface ApiPoint {
 
 export const POINT_COLUMNS =
   'p.id, p.type, p.lat, p.lng, p.speed_limit, p.direction, p.note, p.visibility, ' +
-  'p.status, p.status_reason, p.expires_at, p.confirm_count, p.gone_count, p.report_count, ' +
+  'p.status, p.status_reason, p.expires_at, p.confirm_count, p.gone_count, ' +
   'p.slowdown_count, p.last_confirmed_at, p.created_by, p.client_id, p.source, p.created_at, p.updated_at';
 
 /** SELECT of points with the viewer's vote (first parameter: viewer id). */
@@ -211,9 +205,9 @@ export async function updateColumns(
 // ---- Counters and automatic hiding --------------------------------------
 
 /**
- * Recalculates the vote / report counters of these points and applies the
- * community rules: enough "gone" votes or reports hide a point; enough
- * confirmations bring back a point hidden by votes.
+ * Recalculates the vote counters of these points and applies the
+ * community rules: enough "gone" votes hide a point; enough confirmations
+ * bring it back.
  */
 export async function recountPoints(conn: Queryable, ids: number[]): Promise<void> {
   const list = [...new Set(ids)];
@@ -223,8 +217,7 @@ export async function recountPoints(conn: Queryable, ids: number[]): Promise<voi
     `UPDATE points p SET
         confirm_count = (SELECT COUNT(*) FROM point_votes v WHERE v.point_id = p.id AND v.vote = 'confirm'),
         gone_count = (SELECT COUNT(*) FROM point_votes v WHERE v.point_id = p.id AND v.vote = 'gone'),
-        last_confirmed_at = (SELECT MAX(v.updated_at) FROM point_votes v WHERE v.point_id = p.id AND v.vote = 'confirm'),
-        report_count = (SELECT COUNT(*) FROM point_reports r WHERE r.point_id = p.id AND r.status = 'open')
+        last_confirmed_at = (SELECT MAX(v.updated_at) FROM point_votes v WHERE v.point_id = p.id AND v.vote = 'confirm')
       WHERE p.id IN (?)`,
     [list],
   );
@@ -269,20 +262,6 @@ export async function recountPoints(conn: Queryable, ids: number[]): Promise<voi
                                              last_confirmed_at + INTERVAL ? MINUTE)
       WHERE id IN (?) AND type = 'mobile' AND last_confirmed_at IS NOT NULL`,
     [RULES.mobileLifetimeMin, list],
-  );
-  await execute(
-    conn,
-    `UPDATE points SET status = 'hidden', status_reason = 'reports'
-      WHERE id IN (?) AND status = 'active' AND report_count >= ? AND report_count > confirm_count`,
-    [list, RULES.reportsToHide],
-  );
-  // Reports dismissed by a moderator: the point comes back.
-  await execute(
-    conn,
-    `UPDATE points SET status = 'active', status_reason = NULL
-      WHERE id IN (?) AND status = 'hidden' AND status_reason = 'reports'
-        AND (report_count < ? OR report_count <= confirm_count)`,
-    [list, RULES.reportsToHide],
   );
 }
 
@@ -503,7 +482,7 @@ async function othersConfirmed(conn: Queryable, id: number, ownerId: number): Pr
   return r?.n ?? 0;
 }
 
-// ---- Votes and reports ---------------------------------------------------
+// ---- Votes ---------------------------------------------------------------
 
 /** A point drivers can vote on: shown on the map, or hidden only by votes
  * (so confirmations can bring it back). */
@@ -537,31 +516,6 @@ export async function unvotePoint(db: Db, user: AuthUser, id: number): Promise<A
     await execute(conn, 'DELETE FROM point_votes WHERE point_id = ? AND user_id = ?', [id, user.id]);
     await recountPoints(conn, [id]);
     return toApiPoint((await getRow(conn, id, user.id))!, user.id);
-  });
-}
-
-export async function reportPoint(
-  db: Db,
-  user: AuthUser,
-  id: number,
-  reason: ReportReason,
-  comment: string | null,
-): Promise<{ id: string }> {
-  return transaction(db, async (conn) => {
-    await mustSeeForCommunity(conn, id, user);
-    const open = await selectOne<{ id: number }>(
-      conn,
-      "SELECT id FROM point_reports WHERE point_id = ? AND user_id = ? AND status = 'open'",
-      [id, user.id],
-    );
-    if (open) throw conflict('already_reported', 'You already reported this point.');
-    const r = await execute(
-      conn,
-      'INSERT INTO point_reports (point_id, user_id, reason, comment) VALUES (?, ?, ?, ?)',
-      [id, user.id, reason, comment?.trim() || null],
-    );
-    await recountPoints(conn, [id]);
-    return { id: String(r.insertId) };
   });
 }
 
